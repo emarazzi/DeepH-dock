@@ -92,10 +92,13 @@ HARTREE_TO_EV = 27.2113845 # 27.211386
 AIMS_CONTROL_FILENAME = "control.in"
 AIMS_STRUCT_FILENAME = "geometry.in"
 AIMS_BASIS_FILENAME = "basis-indices.out"
-FILES_MX_IDX = "rs_indices.out" 
+FILES_MX_IDX = "rs_indices.out"
 FILES_NECESSARY = set([AIMS_CONTROL_FILENAME, AIMS_STRUCT_FILENAME, AIMS_BASIS_FILENAME, FILES_MX_IDX])
+FILES_LOG = 'aims.out'
 FILES_IN = ["rs_overlap.out", "rs_hamiltonian.out"]
 FILES_IN_SPIN = ["rs_overlap.out", "rs_hamiltonian_up.out", "rs_hamiltonian_dn.out"]  # not support spin orbit coupling yet
+FILES_IN_HDF5 = ["rs_overlap.h5", "rs_hamiltonian.h5"]
+FILES_IN_SPIN_HDF5 = ["rs_overlap.h5", "rs_hamiltonian_up.h5", "rs_hamiltonian_down.h5"]
 FILES_OUT = [DEEPX_HAMILTONIAN_FILENAME, DEEPX_OVERLAP_FILENAME]
 UNITS = [HARTREE_TO_EV, 1.0]
 BASIS_TYPE_ORDER = {'ionic': 0, 'atomic': 1, 'hydro': 2}  # for sorting basis types
@@ -112,8 +115,15 @@ def _read_ctrl_in(aims_dir_path: Path):
     if 'spin' in ctrl_params.keys():
         if ctrl_params["spin"].lower() == 'collinear':
             spinful = True
+    aims_data_type:str = ctrl_params.get('output_rs_matrices', None)
+    if not aims_data_type:
+        raise ValueError("The 'output_rs_matrices' parameter is missing in control.in!")
+    #if aims_data_type.lower() == 'hdf5':
+    #    raise NotImplementedError("The 'hdf5' output_rs_matrices type is not supported yet!")
+    if aims_data_type.lower() not in ['plain', 'hdf5']:
+        raise ValueError(f"Unsupported 'output_rs_matrices' type: {aims_data_type}!")
 
-    return ctrl_params, spinful
+    return ctrl_params, spinful, aims_data_type.lower()
 
 def _parse_struct(aims_dir_path: Path):
     atoms_path = Path(aims_dir_path) / AIMS_STRUCT_FILENAME
@@ -331,6 +341,50 @@ def _read_ham(aims_dir_path: Path, n_ham_size: int, spinful: bool):
         ham_values = _read_mx_val(ham_path, n_ham_size) * HARTREE_TO_EV
         return ham_values
 
+def _read_mx_val_hdf5(file_path: Path, n_ham_size: int):
+    # file type: hdf5, dataset 'sparse_matrix', size n_ham_size
+    with h5py.File(file_path, 'r') as f:
+        mx_values = f['sparse_matrix'][:]
+    mx_values = np.array(mx_values, dtype=np.float64)
+    if mx_values.shape[0] == n_ham_size + 1:
+        # Check if the extra value is indeed zero-padding (common in some aims outputs)
+        # But primarily rely on shape
+        mx_values = mx_values[:-1]
+    else:
+        assert mx_values.shape[0] == n_ham_size, f"Matrix size match error: expected {n_ham_size}, got {mx_values.shape[0]}"
+    return mx_values
+
+def _read_ovlp_hdf5(aims_dir_path: Path, n_ham_size: int):
+    ovlp_path = Path(aims_dir_path) / FILES_IN_HDF5[0]
+    return _read_mx_val_hdf5(ovlp_path, n_ham_size)
+
+def _read_ham_hdf5(aims_dir_path: Path, n_ham_size: int, spinful: bool):
+    if spinful:
+        ham_up_path = Path(aims_dir_path) / FILES_IN_SPIN_HDF5[1]
+        ham_dn_path = Path(aims_dir_path) / FILES_IN_SPIN_HDF5[2]
+        ham_up_values = _read_mx_val_hdf5(ham_up_path, n_ham_size) * HARTREE_TO_EV
+        ham_dn_values = _read_mx_val_hdf5(ham_dn_path, n_ham_size) * HARTREE_TO_EV
+        return ham_up_values, ham_dn_values
+    else:
+        ham_path = Path(aims_dir_path) / FILES_IN_HDF5[1]
+        ham_values = _read_mx_val_hdf5(ham_path, n_ham_size) * HARTREE_TO_EV
+        return ham_values
+
+def _read_fermi(aims_dir_path: Path):
+    log_path = Path(aims_dir_path) / FILES_LOG
+    fermi_energy = 0.0
+    '''
+    ref:
+        | Chemical potential (Fermi level) in eV      :  -.53575976E+01
+    '''
+    with open(log_path, 'r') as f:
+        lines = f.readlines()
+    for line in lines:
+        if "| Chemical potential (Fermi level) in eV" in line:
+            fermi_energy = float(line.split(':')[-1].strip())
+            break
+    return fermi_energy
+
 def _trans_mxs_to_entries(start_idx_matrix:np.ndarray, end_idx_matrix:np.ndarray, col_idx:np.ndarray, 
                           cell_indices:np.ndarray, orbit_quantity_list: list[int], phase_factor: np.ndarray,
                           mxs: list[np.ndarray], n_cells:int, n_basis:int, sub_idx:np.ndarray):
@@ -427,10 +481,14 @@ class PeriodicAimsDataTranslator:
         data_dir_lister = get_data_dir_lister(
             self.aims_data_dir, self.n_tier, validation_check_aims
         )
-        Parallel(n_jobs=self.n_jobs)(
+        results = Parallel(n_jobs=self.n_jobs)(
             delayed(worker)(dir_name)
             for dir_name in tqdm(data_dir_lister, desc="Data")
-        )
+        ) # -1 if not have aims.out, 0 if have aims.out and get the fermi level
+        # Count errors
+        n_err = sum(1 for r in results if r is not None and r != 0)
+        if n_err > 0:
+            print(f"Warning: {n_err} directories can not find log file: {FILES_LOG}. \nThus the Fermi level is not extracted correctly and set to 0.0 eV.")
 
     @staticmethod
     def transfer_one_aims_to_deeph(dir_name: str, aims_path: Path, deeph_path: Path,
@@ -440,8 +498,9 @@ class PeriodicAimsDataTranslator:
             return
         deeph_dir_path = deeph_path / dir_name
         reader = FHIAimsReader(aims_dir_path, deeph_dir_path)
-        reader.analysis_data()
+        ierr = reader.analysis_data()
         reader.dump_data(export_rho=export_rho, export_r=export_r)
+        return ierr
 
 class FHIAimsReader:
     def __init__(self, aims_path: str | Path, deeph_path: str | Path):
@@ -449,9 +508,9 @@ class FHIAimsReader:
         self.deeph_path = Path(deeph_path)
         self.mx_lst:list[np.ndarray] = []  # list of sparse matrix
 
-    def analysis_data(self, aims_save_type: str = 'plain'):   # plain / hdf5
-        # ------------ calculatiom parameters from control.in ------------
-        self.ctrl_params, self.spinful = _read_ctrl_in(self.aims_path)
+    def analysis_data(self):
+        # ------------ calculation parameters from control.in ------------
+        self.ctrl_params, self.spinful, self.aims_data_type = _read_ctrl_in(self.aims_path)  # DONE: plain / hdf5
         # ------------ structure info from geometry.in ------------
         self.is_periodic, self.lat, self.site_positions, \
         self.element, self.species, sort_idxs = _parse_struct(self.aims_path)
@@ -471,13 +530,24 @@ class FHIAimsReader:
         assert N_orb == sum(self.orbit_quantity_list) == self.n_basis, "Basis number not match!" 
         # ------------ matrix values from rs_overlap.out and rs_hamiltonian.out ------------
         self.mx_lst = []
-        self.mx_lst.append(_read_ovlp(self.aims_path, self.n_ham_size))
-        if self.spinful:
-            ham_up_values, ham_dn_values = _read_ham(self.aims_path, self.n_ham_size, self.spinful)
-            self.mx_lst.append(ham_up_values)
-            self.mx_lst.append(ham_dn_values)
+        if self.aims_data_type == 'plain':
+            self.mx_lst.append(_read_ovlp(self.aims_path, self.n_ham_size))
+            if self.spinful:
+                ham_up_values, ham_dn_values = _read_ham(self.aims_path, self.n_ham_size, self.spinful)
+                self.mx_lst.append(ham_up_values)
+                self.mx_lst.append(ham_dn_values)
+            else:
+                self.mx_lst.append(_read_ham(self.aims_path, self.n_ham_size, self.spinful))
+        elif self.aims_data_type == 'hdf5':
+            self.mx_lst.append(_read_ovlp_hdf5(self.aims_path, self.n_ham_size))
+            if self.spinful:
+                ham_up_values, ham_dn_values = _read_ham_hdf5(self.aims_path, self.n_ham_size, self.spinful)
+                self.mx_lst.append(ham_up_values)
+                self.mx_lst.append(ham_dn_values)
+            else:
+                self.mx_lst.append(_read_ham_hdf5(self.aims_path, self.n_ham_size, self.spinful))
         else:
-            self.mx_lst.append(_read_ham(self.aims_path, self.n_ham_size, self.spinful))
+            raise ValueError(f"Unsupported aims_data_type: {self.aims_data_type}!")
         # ------------ transform to deeph data structure ------------
         self.atom_pairs, self.chunk_boundaries, self.chunk_shapes, self.entries_lst = _trans_mxs_to_entries(
             self.start_idx_matrix, self.end_idx_matrix, self.col_idx, self.cell_indices,
@@ -514,6 +584,14 @@ class FHIAimsReader:
                 ham_entries_lst.append(block_spin.flatten())
             
             self.entries_lst.append(np.concatenate(ham_entries_lst))
+        # ------------ fermi energy from aims.out ------------
+        self.fermi_level = 0.00000
+            # check if file exists
+        if (self.aims_path / FILES_LOG).is_file():
+            self.fermi_level = _read_fermi(self.aims_path)
+            return 0
+        else:
+            return -1
 
     def dump_data(self, export_rho=False, export_r=False):
         # ------------ make deeph data dir ------------
@@ -554,7 +632,7 @@ class FHIAimsReader:
             "orbits_quantity": int(self.n_basis),
             "orthogonal_basis": False,
             "spinful": bool(self.spinful),
-            "fermi_energy_eV": 0.0000,  # TODO: get from aims output if necessary
+            "fermi_energy_eV": self.fermi_level,
             "elements_orbital_map": self.elem_orb_map,
         }
         with open(file_path, 'w') as fwj:
@@ -596,5 +674,8 @@ class FHIAimsReader:
                 'entries', data=self.entries_lst[1]
             )
 
+    # TODO: parallel HDF5 support case aims_save_type='hdf5'
     # TODO: density matrix, real-space grid V, etc
     # TODO: only dump S if we can calc S separately?
+    # TODO: support non-collinear spin and SOC cases
+    
