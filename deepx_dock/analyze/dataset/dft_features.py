@@ -130,7 +130,7 @@ class DFTDatasetFeaturesDetective:
         self.data_dir_depth = data_dir_depth
         self.parallel_num = parallel_num
         #
-        self.feature_file = self.root_path / DATASET_FEATURES_FILENAME
+        self.feature_file = self.root_path.parent / DATASET_FEATURES_FILENAME
         self._features = DFTDatasetFeatures()
 
     @property
