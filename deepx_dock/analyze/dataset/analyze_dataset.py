@@ -43,6 +43,17 @@ def _convert_list_to_orbital_string(ls):
         return None
     return string
 
+def _suggest_bs3b_orbital_types(ls):
+    orbital_map = ['s', 'p', 'd', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n']
+    orbi_factor = [ 5 ,  3 ,  2 ,  1 ,  1 ,  1 ,  1 ,  1 ,  1 ,  1 ,  1 ,  1 ]
+    string = ""
+    ls_counts = np.bincount(ls)
+    for ll, n in enumerate(ls_counts):
+        string += f'{orbital_map[ll]}{n*orbi_factor[ll]}'
+    if len(string) == 0:
+        return None
+    return string
+
 
 def _common_orbital_types_to_irreps(
     common_orbital_types, spinful: bool, consider_parity: bool
@@ -108,6 +119,10 @@ class DatasetAnalyzer:
             PERIODIC_TABLE_INDEX_TO_SYMBOL[v] 
             for v in self.dft_features.elements_orbital_map.keys()
         ]
+
+        # 
+        common_orbital_types_str = _convert_list_to_orbital_string(common_orbital_types)
+        suggested_bs3b_orb_types_str = _suggest_bs3b_orbital_types(common_orbital_types)
         
         # Output
         # - Basic info
@@ -120,13 +135,10 @@ class DatasetAnalyzer:
         # - Elements and orbital
         print("\n🧪 ELEMENT & ORBITAL INFO")
         print("---------------------------")
-        print(f"  • Elements included:      {', '.join(elements)} ({len(elements)} elements)")
-        print(f"  • Orbital source:         {orbital_source}")
-        
-        if common_orbital_types is not None:
-            print(f"  • BS3B orbital types:     {common_orbital_types}")
-        else:
-            print(f"  • Common orbital types:   {_convert_list_to_orbital_string(common_orbital_types)}")
+        print(f"  • Elements included:            {', '.join(elements)} ({len(elements)} elements)")
+        print(f"  • Orbital source:               {orbital_source}")
+        print(f"  • Common orbital types:         {common_orbital_types_str}")
+        print(f"  • Suggested BS3B orbital types: {suggested_bs3b_orb_types_str}")
         
         # - Irreps
         print("\n🎯 IRREPS INFORMATION")
