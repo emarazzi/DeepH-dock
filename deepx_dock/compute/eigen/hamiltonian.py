@@ -123,26 +123,30 @@ class AOMatrixObj:
             The dtype is float.
 
     """
-    def __init__(self, info_dir_path, matrix_file_path=None, matrix_type="hamiltonian", mats=None):
-        self._get_necessary_data_path(info_dir_path, matrix_file_path, matrix_type)
+    def __init__(self,
+        info_dir_path, matrix_file_path=None,
+        matrix_type="hamiltonian", mats=None
+    ):
+        self._get_necessary_data_path(
+            info_dir_path, matrix_file_path, matrix_type
+        )
         #
         self.mats = None
         self.Rijk_list = None
         #
-        Rijk_only = False
-        if mats is not None or (matrix_file_path is None and mats is None):
-            Rijk_only = True
+        Rijk_only = (mats is not None)
         #
         self.parse_data(matrix_type, Rijk_only)
         self._sort_Rijk()
         if mats is not None:
             self.mats = mats
-        assert self.R_quantity == len(mats), \
-            f"Mismatch: R_quantity={self.R_quantity}, mats_len={len(mats)}"
+            assert self.R_quantity == len(mats), f"Mismatch: R_quantity={self.R_quantity}, mats_len={len(mats)}"
     
     @classmethod
-    def from_kspace(cls, info_dir_path, AOMatrixK_obj, matrix_type="hamiltonian", 
-                    r_process_num=1, thread_num=None):
+    def from_kspace(cls,
+        info_dir_path, AOMatrixK_obj, matrix_type="hamiltonian", 
+        r_process_num=1, thread_num=None
+    ):
         """
         Construct a real-space AOMatrixObj from a k-space AOMatrixK object via Inverse Fourier Transform.
 
