@@ -171,6 +171,8 @@ def _check_and_fix_basis_idx(aims_dir_path: Path):
     this_line_info = []
     prev_line_info = []
     this_line_atom_index = 1
+    this_line_basis_index = 1
+    skips = ["   ", " ", "      ", "   ", "   ", "   "]
 
     for idx_line, line_info in enumerate(basis_info):
         if line_info.strip() == '':
@@ -184,10 +186,20 @@ def _check_and_fix_basis_idx(aims_dir_path: Path):
         if len(prev_line_info) == 0:
             prev_line_info = this_line_info.copy()
             continue
+
+        line_modified = False
+
+        try:
+            this_line_basis_index = int(this_line_info[0])
+        except ValueError: #while ***
+            this_line_basis_index = int(prev_line_info[0]) + 1
+            this_line_info[0] = str(this_line_basis_index)
+            line_modified = True
         
         try:
             this_line_atom_index = int(this_line_info[2])  # if atom_index is int
         except ValueError: # while ***
+            line_modified = True
             prev_n = int(prev_line_info[3])
             this_n = int(this_line_info[3])
             assert this_n > 0, f"Invalid basis line: {this_line_info}"
@@ -200,13 +212,15 @@ def _check_and_fix_basis_idx(aims_dir_path: Path):
                         and prev_line_info[4] == this_line_info[4] and prev_line_info[5] == this_line_info[5]):
                         this_line_atom_index +=1
             this_line_info[2] = str(this_line_atom_index)
-            skips = ["   ", " ", "      ", "   ", "   ", "   "]
+            
+        if line_modified:
             # basis_info = skips[0]+info[0]+skips[1]+info[1]+...
             basis_info[idx_line] = "".join([skips[i] + this_line_info[i] for i in range(len(this_line_info))]) + "\n"
+        
         prev_line_info = this_line_info.copy()
 
-        with open(basis_path, 'w') as bs_idx_file:
-            bs_idx_file.writelines(basis_info)
+    with open(basis_path, 'w') as bs_idx_file:
+        bs_idx_file.writelines(basis_info)
 
 def _parse_basis(aims_dir_path: Path, atomic_num: int, species: list[str], sort_idxs: np.ndarray):
     basis_path = Path(aims_dir_path) / AIMS_BASIS_FILENAME
