@@ -88,7 +88,7 @@ These documents are written for:
 2. **Automation** - CLI auto-registration, minimal boilerplate
 3. **Standardization** - Unified data format across all DFT codes
 4. **Extensibility** - Easy to add new DFT converters and functions
-5. **Performance** - Multi-level parallel processing (MPI/Loky/threads)
+5. **Performance** - Multi-level parallel processing (MPI/threads)
 
 ## Related Documentation
 

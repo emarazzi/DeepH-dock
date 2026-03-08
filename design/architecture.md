@@ -371,7 +371,7 @@ def calc_eigen(method="direct"):
 
 ### 3. Multi-level Parallel vs Simple Parallel
 
-**Choice**: Multi-level (MPI/Loky/threads)
+**Choice**: Multi-level (MPI/threads)
 
 **Pros**:
 - Maximum flexibility
