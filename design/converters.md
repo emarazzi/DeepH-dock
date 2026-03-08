@@ -300,11 +300,13 @@ def downgrade_dataset(new_dir: Path, old_dir: Path):
 
 ```python
 # Process multiple structures in parallel
-from joblib import Parallel, delayed
+from deepx_dock.parallel import parallel_map
 
-results = Parallel(n_jobs=n_jobs)(
-    delayed(convert_single)(data_dir)
-    for data_dir in data_dirs
+results = parallel_map(
+    convert_single,
+    data_dirs,
+    n_jobs=n_jobs,
+    desc="Converting"
 )
 ```
 

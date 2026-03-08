@@ -75,7 +75,8 @@ class BandDataGenerator:
 
     def calc_band_data(
         self,
-        k_process_num=1,
+        n_jobs=-1,
+        parallel_k=True,
         sparse_calc=False,
         ill_method=None,
         ill_threshold=None,
@@ -87,8 +88,14 @@ class BandDataGenerator:
 
         Parameters
         ----------
-        k_process_num : int
-            Number of parallel processes for k-point calculations.
+        n_jobs : int
+            Number of parallel workers. Default is -1 (auto-detect).
+            - If parallel_k=True: number of k-points to process in parallel.
+            - If parallel_k=False: number of BLAS threads for diagonalization.
+        parallel_k : bool
+            Parallelization strategy. Default is True.
+            - True: Multiple k-points in parallel, each with 1 BLAS thread.
+            - False: K-points processed sequentially, each with n_jobs BLAS threads.
         sparse_calc : bool
             If True, use sparse diagonalization.
         ill_method : str or None
@@ -115,7 +122,7 @@ class BandDataGenerator:
 
             if ill_method == "orbital_removal":
                 ks = np.array(self.kpoints_frac_list)
-                Sk_list = self.obj_H.get_all_Sk(ks, k_process_num=k_process_num)
+                Sk_list = self.obj_H.get_all_Sk(ks, n_jobs=n_jobs, parallel_k=parallel_k)
                 ill_handler.prepare_orbital_truncation(Sk_list)
 
         if sparse_calc:
@@ -139,7 +146,8 @@ class BandDataGenerator:
 
         self.band_data = self.obj_H.diag(
             self.kpoints_frac_list,
-            k_process_num=k_process_num,
+            n_jobs=n_jobs,
+            parallel_k=parallel_k,
             sparse_calc=sparse_calc,
             bands_only=True,
             ill_handler=ill_handler,

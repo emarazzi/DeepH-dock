@@ -7,16 +7,16 @@ eigenvalue handling.
 """
 
 import os
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import numpy as np
 from scipy.linalg import eigh
 from scipy.sparse.linalg import eigsh
 from tqdm import tqdm
-from joblib import Parallel, delayed
 import threadpoolctl
 
-from deepx_dock.compute.eigen.matrix_obj import AOMatrixObj, AOMatrixK
+from deepx_dock.parallel import parallel_map
+from deepx_dock.compute.eigen.matrix_obj import AOMatrixObj
 
 
 class HamiltonianObj(AOMatrixObj):
@@ -110,8 +110,8 @@ class HamiltonianObj(AOMatrixObj):
     def diag(
         self,
         ks,
-        k_process_num: int = 1,
-        thread_num: Optional[int] = None,
+        n_jobs: int = -1,
+        parallel_k: bool = True,
         sparse_calc: bool = False,
         bands_only: bool = True,
         ill_handler=None,
@@ -125,10 +125,14 @@ class HamiltonianObj(AOMatrixObj):
         ----------
         ks : array_like, shape (Nk, 3)
             k-points in reduced coordinates (fractional).
-        k_process_num : int, optional
-            Number of parallel processes. Default is 1.
-        thread_num : int, optional
-            Number of BLAS threads per process. Default is from environment.
+        n_jobs : int, optional
+            Number of parallel workers. Default is -1 (auto-detect CPU cores).
+            - If parallel_k=True: number of k-points to process in parallel.
+            - If parallel_k=False: number of BLAS threads for diagonalization.
+        parallel_k : bool, optional
+            Parallelization strategy. Default is True.
+            - True: Multiple k-points in parallel, each with 1 BLAS thread.
+            - False: K-points processed sequentially, each with n_jobs BLAS threads.
         sparse_calc : bool, optional
             If True, use sparse solver (eigsh). Default is False.
         bands_only : bool, optional
@@ -146,7 +150,22 @@ class HamiltonianObj(AOMatrixObj):
             Eigenvalues (band energies).
         eigvecs : np.ndarray, shape (Norb, Nband, Nk), optional
             Eigenvectors (only if bands_only is False).
+
+        Notes
+        -----
+        The parallel_k parameter controls the parallelization strategy:
+
+        - parallel_k=True (default): Best for many small k-point calculations.
+          Multiple k-points are processed concurrently, each using single-threaded
+          BLAS. This avoids thread oversubscription and cache contention.
+
+        - parallel_k=False: Best for few large matrix diagonalizations.
+          K-points are processed one at a time, but each diagonalization uses
+          multi-threaded BLAS for faster matrix operations.
         """
+        if n_jobs < 0:
+            n_jobs = os.cpu_count() or 1
+
         HR = self.HR
         SR = self.SR
 
@@ -154,17 +173,14 @@ class HamiltonianObj(AOMatrixObj):
             Sk = self._r2k(k[None, :], self.Rijk_list, SR)[0]
             Hk = self._r2k(k[None, :], self.Rijk_list, HR)[0]
 
-            # Handle ill-conditioned eigenvalues
             if ill_handler is not None:
                 return ill_handler.process_k(Hk, Sk, return_vecs=not bands_only)
 
-            # Handle orbital removal mode (direct)
             if kept_orbitals is not None:
                 from deepx_dock.compute.eigen.ill_conditioned import eig_with_orbital_mask
 
                 return eig_with_orbital_mask(Hk, Sk, kept_orbitals, return_vecs=not bands_only)
 
-            # Standard diagonalization
             if sparse_calc:
                 if bands_only:
                     vals = eigsh(Hk, M=Sk, return_eigenvectors=False, **kwargs)
@@ -181,14 +197,17 @@ class HamiltonianObj(AOMatrixObj):
                     vals, vecs = eigh(Hk, Sk)
                     return vals, vecs
 
-        if thread_num is None:
-            thread_num = int(os.environ.get("OPENBLAS_NUM_THREADS", "1"))
-
-        with threadpoolctl.threadpool_limits(limits=thread_num, user_api="blas"):
-            if k_process_num == 1:
-                results = [process_k(k) for k in tqdm(ks, leave=False)]
-            else:
-                results = Parallel(n_jobs=k_process_num)(delayed(process_k)(k) for k in tqdm(ks, leave=False))
+        if parallel_k:
+            n_blas_threads = 1
+            with threadpoolctl.threadpool_limits(limits=n_blas_threads, user_api="blas"):
+                if n_jobs == 1:
+                    results = [process_k(k) for k in tqdm(ks, leave=False, desc="Diagonalizing")]
+                else:
+                    results = parallel_map(process_k, ks, n_jobs=n_jobs, desc="Diagonalizing")
+        else:
+            n_blas_threads = n_jobs
+            with threadpoolctl.threadpool_limits(limits=n_blas_threads, user_api="blas"):
+                results = [process_k(k) for k in tqdm(ks, leave=False, desc="Diagonalizing")]
 
         if bands_only:
             return np.stack(results, axis=1)
@@ -197,7 +216,7 @@ class HamiltonianObj(AOMatrixObj):
             eigvecs = np.stack([res[1] for res in results], axis=2)
             return eigvals, eigvecs
 
-    def get_all_Sk(self, ks, k_process_num: int = 1, thread_num: Optional[int] = None):
+    def get_all_Sk(self, ks, n_jobs: int = -1, parallel_k: bool = True):
         """
         Get overlap matrices for all k-points.
 
@@ -208,28 +227,33 @@ class HamiltonianObj(AOMatrixObj):
         ----------
         ks : np.ndarray, shape (Nk, 3)
             k-points in fractional coordinates.
-        k_process_num : int, optional
-            Number of parallel processes.
-        thread_num : int, optional
-            Number of BLAS threads per process.
+        n_jobs : int, optional
+            Number of parallel workers. Default is -1 (auto-detect CPU cores).
+        parallel_k : bool, optional
+            Parallelization strategy. Default is True.
+            See diag() method for details.
 
         Returns
         -------
         Sk_list : list of np.ndarray
             List of overlap matrices, each with shape (Nb, Nb).
         """
-        if thread_num is None:
-            thread_num = int(os.environ.get("OPENBLAS_NUM_THREADS", "1"))
+        if n_jobs < 0:
+            n_jobs = os.cpu_count() or 1
 
         def get_Sk(k):
             return self._r2k(k[None, :], self.Rijk_list, self.SR)[0]
 
-        with threadpoolctl.threadpool_limits(limits=thread_num, user_api="blas"):
-            if k_process_num == 1:
+        if parallel_k:
+            n_blas_threads = 1
+            with threadpoolctl.threadpool_limits(limits=n_blas_threads, user_api="blas"):
+                if n_jobs == 1:
+                    Sk_list = [get_Sk(k) for k in tqdm(ks, leave=False, desc="Getting Sk")]
+                else:
+                    Sk_list = parallel_map(get_Sk, ks, n_jobs=n_jobs, desc="Getting Sk")
+        else:
+            n_blas_threads = n_jobs
+            with threadpoolctl.threadpool_limits(limits=n_blas_threads, user_api="blas"):
                 Sk_list = [get_Sk(k) for k in tqdm(ks, leave=False, desc="Getting Sk")]
-            else:
-                Sk_list = Parallel(n_jobs=k_process_num)(
-                    delayed(get_Sk)(k) for k in tqdm(ks, leave=False, desc="Getting Sk")
-                )
 
         return Sk_list

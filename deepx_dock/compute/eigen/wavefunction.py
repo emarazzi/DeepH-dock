@@ -5,11 +5,11 @@ import threadpoolctl
 
 import numpy as np
 from scipy.spatial import KDTree
-from joblib import Parallel, delayed
 
 from HPRO.utils.structure import Structure
 from HPRO.io.aodata import AOData
 
+from deepx_dock.parallel import parallel_map
 from deepx_dock.misc import load_json_file, load_poscar_file
 from deepx_dock.CONSTANT import BOHR_TO_ANGSTROM
 from deepx_dock.CONSTANT import DEEPX_POSCAR_FILENAME
@@ -122,7 +122,7 @@ class AOWfnObj:
         #
         return np.vstack([b1, b2, b3])
 
-    def to_real_space(self, ik, ib, gridsize, process_num_per_grid=1):
+    def to_real_space(self, ik, ib, gridsize, n_jobs=1):
         """
         Compute the periodic part of Bloch wavefunction u_{nk}(r) = e^{-ikr} * psi_{nk}(r).
         
@@ -130,7 +130,7 @@ class AOWfnObj:
             ik: int, k point index
             ib: int, band index
             gridsize: np.ndarray (3,), real space grid size
-            process_num_per_grid: int, number of processes for a single real space grid
+            n_jobs: int, number of processes for a single real space grid
         
         Returns:
             u_grid: np.ndarray (nx, ny, nz), complex, Bloch wavefunction values in real space
@@ -229,8 +229,11 @@ class AOWfnObj:
         batches = np.array_split(coarse_indices, n_batches)
         
         with threadpoolctl.threadpool_limits(limits=1, user_api='blas'):
-            results = Parallel(n_jobs=process_num_per_grid, prefer="processes")(
-                delayed(self._calc_u_batch)(batch_idxs, ctx) for batch_idxs in batches
+            results = parallel_map(
+                lambda batch_idxs: self._calc_u_batch(batch_idxs, ctx),
+                batches,
+                n_jobs=n_jobs,
+                desc="Processing batches"
             )
 
         u_grid_flat = np.zeros(np.prod(gridsize), dtype=np.complex128)

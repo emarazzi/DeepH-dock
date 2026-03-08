@@ -318,7 +318,7 @@ def find_fermi_tetrahedron(
 ### 1. K-point Parallelization
 
 ```python
-from joblib import Parallel, delayed
+from deepx_dock.parallel import parallel_map
 
 def diag_parallel(hamiltonian, ks, n_jobs=-1):
     """Parallel diagonalization over k-points"""
@@ -326,8 +326,11 @@ def diag_parallel(hamiltonian, ks, n_jobs=-1):
     def diag_single(k):
         return hamiltonian.diag(k[np.newaxis, :])[0]
     
-    eigenvalues = Parallel(n_jobs=n_jobs)(
-        delayed(diag_single)(k) for k in ks
+    eigenvalues = parallel_map(
+        diag_single,
+        ks,
+        n_jobs=n_jobs,
+        desc="Diagonalizing"
     )
     
     return np.array(eigenvalues)

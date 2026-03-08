@@ -69,7 +69,7 @@ class FermiEnergyAndDOSGenerator:
             raise ValueError("Band occupation statistics show inconsistent patterns")
         return significant_cate > 1
 
-    def find_fermi_energy(self, dk=0.02, k_process_num=1, method="counting"):
+    def find_fermi_energy(self, dk=0.02, n_jobs=-1, parallel_k=True, method="counting"):
         fermi_json = self.data_path / FERMI_ENERGY_INFO_FILENAME
         if fermi_json.exists():
             with open(fermi_json, "r") as f:
@@ -84,8 +84,7 @@ class FermiEnergyAndDOSGenerator:
             raise ValueError(
                 f"occupation ({self.occupation}) is larger than the number of bands ({self.band_quantity * (2.0 - self.spinful)})"
             )
-        #
-        self._calc_eigvals_on_mesh(dk, k_process_num)
+        self._calc_eigvals_on_mesh(dk, n_jobs, parallel_k)
         print(f"Determining fermi energy with method={method} ...")
         if "counting" == method:
             eigvals_flattened = self.eigvals.flatten()
@@ -103,8 +102,10 @@ class FermiEnergyAndDOSGenerator:
         else:
             raise ValueError(f"Unknown method: {method}")
 
-    def calc_dos(self, dk=0.02, emin=None, emax=None, enum=None, k_process_num=1, method="gaussian", sigma=-1.0):
-        self._calc_eigvals_on_mesh(dk, k_process_num)
+    def calc_dos(
+        self, dk=0.02, emin=None, emax=None, enum=None, n_jobs=-1, parallel_k=True, method="gaussian", sigma=-1.0
+    ):
+        self._calc_eigvals_on_mesh(dk, n_jobs, parallel_k)
         print(f"Calculating DOS with emin={emin} eV, emax={emax} eV, enum={enum}, method={method} ...")
         eigvals = self.eigvals - self.fermi_energy
         #
@@ -160,7 +161,7 @@ class FermiEnergyAndDOSGenerator:
         fig_save_path = self.data_path / f"dos.{plot_format}"
         plt.savefig(fig_save_path, format=plot_format, dpi=dpi)
 
-    def _calc_eigvals_on_mesh(self, dk, k_process_num):
+    def _calc_eigvals_on_mesh(self, dk, n_jobs, parallel_k=True):
         if self.eigvals is not None:
             return
         b_lengths = np.linalg.norm(self.reciprocal_lattice, axis=1)
@@ -172,9 +173,8 @@ class FermiEnergyAndDOSGenerator:
                 for ki in np.meshgrid(*[np.arange(nk) * 1.0 / nk for nk in self.kpoint_density], indexing="ij")
             ],
             axis=1,
-        )  # [nktot, 3], k0 goes slowest and k2 goes fastest
+        )
         print(f"Use dk={dk} and k_mesh={self.kpoint_density}")
-        #
         eigval_h5file = self.data_path / DEEPX_EIGVAL_FILENAME
         if eigval_h5file.exists() and self.ill_handler is None:
             with h5py.File(eigval_h5file, "r") as h5file:
@@ -186,13 +186,18 @@ class FermiEnergyAndDOSGenerator:
 
         if self.ill_handler is not None and self.ill_handler.method == "orbital_removal":
             print("Preparing orbital truncation for ill-conditioned handling...")
-            Sk_list = self.obj_H.get_all_Sk(self.ks, k_process_num=k_process_num)
+            Sk_list = self.obj_H.get_all_Sk(self.ks, n_jobs=n_jobs, parallel_k=parallel_k)
             self.ill_handler.prepare_orbital_truncation(Sk_list)
 
-        print(f"Calculating eigenvalues with k_mesh={self.kpoint_density}, k_process_num={k_process_num} ...")
+        print(f"Calculating eigenvalues with k_mesh={self.kpoint_density}, n_jobs={n_jobs} ...")
         self.eigvals = self.obj_H.diag(
-            self.ks, k_process_num=k_process_num, sparse_calc=False, bands_only=True, ill_handler=self.ill_handler
-        )  # [nband, nktot]
+            self.ks,
+            n_jobs=n_jobs,
+            parallel_k=parallel_k,
+            sparse_calc=False,
+            bands_only=True,
+            ill_handler=self.ill_handler,
+        )
 
     def dump_fermi_energy(self):
         json_path = self.data_path / FERMI_ENERGY_INFO_FILENAME

@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 import h5py
 from tqdm import tqdm
-from joblib import Parallel, delayed
+from deepx_dock.parallel import parallel_map
 
 from deepx_dock.CONSTANT import DEEPX_POSCAR_FILENAME, DEEPX_INFO_FILENAME
 from deepx_dock.CONSTANT import DEEPX_OVERLAP_FILENAME, DEEPX_HAMILTONIAN_FILENAME
@@ -55,9 +55,11 @@ class NewDFTTranslator:
         data_dirs = self._find_data_dirs()
         
         # Parallel processing
-        Parallel(n_jobs=self.n_jobs)(
-            delayed(self._convert_single)(data_dir)
-            for data_dir in tqdm(data_dirs, desc="Converting")
+        results = parallel_map(
+            self._convert_single,
+            data_dirs,
+            n_jobs=self.n_jobs,
+            desc="Converting"
         )
     
     def _find_data_dirs(self) -> list[Path]:
@@ -122,7 +124,7 @@ from deepx_dock._cli.registry import register
         click.argument('input_dir', type=click.Path(exists=True)),
         click.argument('output_dir', type=click.Path()),
         click.option(
-            '--parallel-num', '-p', type=int, default=-1,
+            '--jobs-num', '-j', type=int, default=-1,
             help='Parallel processing number (-1 for all cores)'
         ),
         click.option(
@@ -134,13 +136,12 @@ from deepx_dock._cli.registry import register
 def translate_newdft_to_deeph(
     input_dir: str | Path,
     output_dir: str | Path,
-    parallel_num: int,
+    jobs_num: int,
     tier_num: int,
 ):
-    # Lazy import
-    from .translator import NewDFTTranslator
+    from .translator import NewDFTTranslator  # Lazy import
     
-    translator = NewDFTTranslator(input_dir, output_dir, parallel_num)
+    translator = NewDFTTranslator(input_dir, output_dir, n_jobs=jobs_num, n_tier=tier_num)
     translator.convert_all()
     click.echo("[done] Conversion completed successfully!")
 ```
@@ -161,7 +162,7 @@ cd ${script_path}
 rm -rf output_dir
 
 # Run conversion
-dock convert new-dft-code to-deeph input.bak output_dir -p 1
+dock convert new-dft-code to-deeph input.bak output_dir -j 1
 
 # Validate outputs
 for d1 in $(ls output_dir); do
@@ -350,20 +351,20 @@ from deepx_dock._cli.registry import register
     cli_help="Analyze new aspect of the data",
     cli_args=[
         click.argument('data_path', type=click.Path(exists=True)),
-        click.option('--parallel-num', '-p', type=int, default=-1),
+        click.option('--jobs-num', '-j', type=int, default=-1),
         click.option('--plot', is_flag=True, help='Generate plots'),
         click.option('--output-dir', '-o', type=click.Path()),
     ],
 )
 def analyze_new_feature(
     data_path: str | Path,
-    parallel_num: int,
+    jobs_num: int,
     plot: bool,
     output_dir: str,
 ):
     from .analyzer import NewAnalyzer
     
-    analyzer = NewAnalyzer(data_path, n_jobs=parallel_num)
+    analyzer = NewAnalyzer(data_path, n_jobs=jobs_num)
     results = analyzer.analyze()
     
     if plot:
@@ -461,9 +462,12 @@ class Processor:
         self.n_jobs = n_jobs
     
     def process_all(self):
-        results = Parallel(n_jobs=self.n_jobs)(
-            delayed(self._process_single)(item)
-            for item in tqdm(items, desc="Processing")
+        from deepx_dock.parallel import parallel_map
+        results = parallel_map(
+            self._process_single,
+            items,
+            n_jobs=self.n_jobs,
+            desc="Processing"
         )
         return results
 ```

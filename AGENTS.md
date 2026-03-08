@@ -40,9 +40,9 @@ from typing import List, Optional, Tuple
 import h5py
 import numpy as np
 from click import argument, option
-from joblib import Parallel, delayed
 
 # Local imports (alphabetically)
+from deepx_dock.parallel import parallel_map
 from deepx_dock.CONSTANT import DEEPX_HAMILTONIAN_FILENAME
 from deepx_dock.misc import load_json_file
 ```
@@ -51,11 +51,15 @@ from deepx_dock.misc import load_json_file
 - Import specific functions/classes, not entire modules (except numpy)
 
 ### Naming Conventions
-- **Functions/Variables**: `snake_case` (e.g., `translate_to_deeph`, `parallel_num`)
+- **Functions/Variables**: `snake_case` (e.g., `translate_to_deeph`, `n_jobs`)
 - **Classes**: `PascalCase` (e.g., `HamiltonianObj`, `DatasetAnalyzer`)
 - **Constants**: `UPPER_CASE` (e.g., `DEEPX_HAMILTONIAN_FILENAME`, `HARTREE_TO_EV`)
 - **CLI commands**: `kebab-case` (e.g., `to-deeph`, `calc-band`)
 - **Private methods**: `_leading_underscore` (e.g., `_read_h5`, `_validation_check`)
+- **Parameter naming**:
+  - CLI options: `--jobs-num`, `--tier-num` (kebab-case)
+  - CLI function parameters: `jobs_num`, `tier_num` (matches click convention)
+  - Class `__init__` parameters: `n_jobs`, `n_tier` (unified `n_` prefix)
 
 ### Type Hints
 ```python
@@ -65,8 +69,8 @@ def load_poscar_file(file_path: str | Path) -> dict:
 
 def analyze_data(
     data_path: str | Path,
-    parallel_num: int = -1,
-    tier_num: int = 0,
+    n_jobs: int = -1,
+    n_tier: int = 0,
 ) -> None:
     ...
 
@@ -181,17 +185,17 @@ from deepx_dock._cli.registry import register
     cli_args=[
         click.argument('input_dir', type=click.Path(exists=True)),
         click.argument('output_dir', type=click.Path()),
-        click.option('--parallel-num', '-p', type=int, default=-1,
+        click.option('--jobs-num', '-j', type=int, default=-1,
                      help='Parallel processing number (-1 for all cores)'),
     ],
 )
 def translate_newdft_to_deeph(
     input_dir: str | Path,
     output_dir: str | Path,
-    parallel_num: int,
+    jobs_num: int,
 ):
     from .translator import NewDFTTranslator  # Lazy import
-    translator = NewDFTTranslator(input_dir, output_dir)
+    translator = NewDFTTranslator(input_dir, output_dir, n_jobs=jobs_num)
     translator.translate()
 ```
 
@@ -218,14 +222,10 @@ def __init__(self, data_dir: str | Path):
 
 ### Parallel Processing
 ```python
-from joblib import Parallel, delayed
-from tqdm import tqdm
+from deepx_dock.parallel import parallel_map
 
 # Use n_jobs parameter (default: -1 for all cores)
-results = Parallel(n_jobs=self.n_jobs)(
-    delayed(process_single_item)(item)
-    for item in tqdm(items, desc="Processing")
-)
+results = parallel_map(process_single_item, items, n_jobs=self.n_jobs, desc="Processing")
 ```
 
 ### HDF5 File Operations
@@ -250,14 +250,16 @@ with h5py.File(filepath, 'w') as f:
     cli_args=[
         click.argument('input_path', type=click.Path(exists=True)),
         click.argument('output_path', type=click.Path()),
-        click.option('--parallel-num', '-p', type=int, default=-1),
+        click.option('--jobs-num', '-j', type=int, default=-1),
+        click.option('--tier-num', '-t', type=int, default=0),
         click.option('--force', is_flag=True, help='Force overwrite'),
     ],
 )
 def action_command(
     input_path: str | Path,
     output_path: str | Path,
-    parallel_num: int,
+    jobs_num: int,
+    tier_num: int,
     force: bool,
 ):
     """Brief description of CLI function."""
@@ -272,7 +274,7 @@ def action_command(
         click.confirm(f"{output_path} exists. Overwrite?", abort=True)
     
     # Process
-    processor = ProcessorClass(input_path, output_path, parallel_num)
+    processor = ProcessorClass(input_path, output_path, n_jobs=jobs_num, n_tier=tier_num)
     processor.run()
     click.echo("[done] Processing completed")
 ```
@@ -306,7 +308,7 @@ cd ${script_path}
 rm -rf output_dir
 
 # Run command
-dock convert siesta to-deeph input.bak output_dir -t 0 -p 1
+dock convert siesta to-deeph input.bak output_dir -t 0 -j 1
 
 # Validate outputs
 for d1 in $(ls output_dir); do
@@ -328,6 +330,7 @@ cd ${_pwd}
 - **`pyproject.toml`**: Build config, dependencies, tool settings (ruff, black)
 - **`CONSTANT.py`**: All constants (file names, physical constants, periodic table)
 - **`misc.py`**: Utility functions (load/save JSON/TOML/POSCAR, data directory listing)
+- **`parallel.py`**: Parallel processing utilities using ThreadPoolExecutor
 - **`_cli/registry.py`**: CLI registration decorator system
 - **`_cli/__init__.py`**: Auto-discovery mechanism and command building
 

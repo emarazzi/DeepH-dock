@@ -85,20 +85,21 @@ def __init__(self, data_dir: str | Path):
 
 ### Q: How do I enable parallel processing?
 
-A: Use `joblib.Parallel` with the `n_jobs` parameter:
+A: Use `parallel_map` with the `n_jobs` parameter:
 
 ```python
-from joblib import Parallel, delayed
-from tqdm import tqdm
+from deepx_dock.parallel import parallel_map
 
 class Processor:
     def __init__(self, n_jobs: int = -1):
         self.n_jobs = n_jobs
     
     def process_all(self):
-        results = Parallel(n_jobs=self.n_jobs)(
-            delayed(self._process_single)(item)
-            for item in tqdm(items, desc="Processing")
+        results = parallel_map(
+            self._process_single,
+            items,
+            n_jobs=self.n_jobs,
+            desc="Processing"
         )
         return results
 ```
@@ -278,10 +279,10 @@ A: Use parallel processing:
 
 ```bash
 # Use all cores
-dock convert siesta to-deeph input output -p -1
+dock convert siesta to-deeph input output -j -1
 
 # Use specific number of cores
-dock convert siesta to-deeph input output -p 8
+dock convert siesta to-deeph input output -j 8
 ```
 
 ---
@@ -344,7 +345,7 @@ cd ${script_path}
 rm -rf output_dir
 
 # Run command
-dock convert new-dft to-deeph input.bak output_dir -p 1
+dock convert new-dft to-deeph input.bak output_dir -j 1
 
 # Validate outputs
 for d1 in $(ls output_dir); do

@@ -8,7 +8,7 @@ cd ${script_path}
 rm -rf deeph
 
 echo "[do] Running commands in ${script_relative_path} ..."
-dock convert siesta to-deeph siesta.bak deeph -t 0 -p 1
+dock convert siesta to-deeph siesta.bak deeph -t 0 -j 1
 sleep 1
 echo "[done] Running commands"
 

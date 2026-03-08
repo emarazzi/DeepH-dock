@@ -88,13 +88,13 @@ from deepx_dock._cli.registry import register
     cli_help="Convert SIESTA output to DeepH format",
     cli_args=[
         click.argument('input_dir'),
-        click.option('--parallel-num', default=-1),
+        click.option('--jobs-num', default=-1),
     ],
 )
-def translate_siesta_to_deeph(input_dir, parallel_num):
+def translate_siesta_to_deeph(input_dir, jobs_num):
     # Lazy import for performance
     from .translator import SIESTADatasetTranslator
-    translator = SIESTADatasetTranslator(input_dir, parallel_num)
+    translator = SIESTADatasetTranslator(input_dir, jobs_num)
     translator.convert()
 ```
 
@@ -198,8 +198,8 @@ deepx_dock/
 ```
 1. MPI Parallel (mpi4py)
    └── Cross-node distributed computing
-       └── Loky Multi-process (joblib)
-           └── Single-node multi-core
+       └── ThreadPoolExecutor (Python standard library)
+           └── Single-node multi-thread
                └── Thread Control (threadpoolctl)
                    └── Single-core optimization
 ```
@@ -207,37 +207,45 @@ deepx_dock/
 #### Implementation Pattern
 
 ```python
-from joblib import Parallel, delayed
-from tqdm import tqdm
+from deepx_dock.parallel import parallel_map
 
 class Processor:
-    def __init__(self, data_dir, n_jobs=-1):
+    def __init__(self, data_dir: str | Path, n_jobs: int = -1):
         self.n_jobs = n_jobs
     
     def process_all(self):
-        results = Parallel(n_jobs=self.n_jobs)(
-            delayed(self._process_single)(item)
-            for item in tqdm(items, desc="Processing")
+        results = parallel_map(
+            self._process_single,
+            items,
+            n_jobs=self.n_jobs,
+            desc="Processing"
         )
         return results
 ```
 
 **Design Decisions**:
-- **n_jobs=-1**: Default to using all cores
-- **Loky backend**: More stable than multiprocessing
-- **Progress bars**: Use tqdm for user feedback
-- **Thread control**: Prevent oversubscription
+- **ThreadPoolExecutor**: Lower memory overhead, faster startup than multiprocessing
+- **n_jobs=-1**: Auto-detect available cores (ThreadPoolExecutor default)
+- **n_jobs=1**: Sequential execution (avoid threading overhead)
+- **Thread safety**: numpy/scipy/h5py release GIL during operations
+
+**Why ThreadPoolExecutor over joblib**:
+1. **Memory efficiency**: Shared memory vs copy per process
+2. **Startup speed**: No process spawning overhead
+3. **Standard library**: No external dependency
+4. **GIL friendly**: DeepH-dock uses numpy/scipy which release GIL
+5. **Simpler maintenance**: Standard library API is stable
 
 **Usage**:
 ```bash
-# Single-core
-dock convert siesta to-deeph input output -p 1
+# Use all cores (default)
+dock convert siesta to-deeph input output
 
-# Multi-core (default: all cores)
-dock convert siesta to-deeph input output -p -1
+# Sequential (for small tasks)
+dock convert siesta to-deeph input output -j 1
 
-# Specific number of cores
-dock convert siesta to-deeph input output -p 8
+# Specific number of threads
+dock convert siesta to-deeph input output -j 8
 ```
 
 ---

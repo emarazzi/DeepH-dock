@@ -8,7 +8,43 @@ This document provides a quick overview of features currently in development or 
 
 ## High Priority
 
-### 🚧 Improve Documentation
+### ✅ Migrate to ThreadPoolExecutor (Completed)
+
+**Status**: Completed  
+**Date**: 2025-03-08
+
+**Description**: Replaced joblib with Python standard library ThreadPoolExecutor for parallel processing, and standardized CLI parameters.
+
+**Phase 1 - joblib Migration**:
+- Removed joblib dependency
+- Created `deepx_dock/parallel.py` with `parallel_map` utility
+- Updated 16 files to use new parallel system
+- Benefits:
+  - Lower memory overhead (shared memory vs process copy)
+  - Faster startup (no process spawning)
+  - Standard library only (no external dependency)
+  - Thread-safe for numpy/scipy/h5py operations
+
+**Phase 2 - CLI Parameter Migration**:
+- Changed CLI parameters from `-p/--jobs-num` to `-j/--jobs-num`
+- Standardized parameter naming convention:
+  - CLI options: `--jobs-num`, `--tier-num` (kebab-case)
+  - CLI function parameters: `jobs_num`, `tier_num` (matches click convention)
+  - Class `__init__` parameters: `n_jobs`, `n_tier` (unified `n_` prefix)
+- Updated 26 files with new parameter names
+- Benefits:
+  - Industry standard naming (`-j` like `make -j`)
+  - Consistent parameter naming across codebase
+  - Clearer parameter purpose
+
+**Performance**:
+- All unit tests passed
+- Maintains compatibility with existing workflow
+- Sequential execution optimized for `n_jobs=1`
+
+---
+
+### 🔜 Improve Documentation
 
 **Status**: In Progress
 

@@ -5,10 +5,9 @@ import collections
 from pathlib import Path
 from ase.io import read
 
-from tqdm import tqdm
 from functools import partial
-from joblib import Parallel, delayed
 
+from deepx_dock.parallel import parallel_map
 from deepx_dock.CONSTANT import DEEPX_INFO_FILENAME
 from deepx_dock.CONSTANT import DEEPX_HAMILTONIAN_FILENAME, DEEPX_OVERLAP_FILENAME, DEEPX_POSCAR_FILENAME
 from deepx_dock.misc import get_data_dir_lister
@@ -553,10 +552,7 @@ class PeriodicAimsDataTranslator:
         data_dir_lister = get_data_dir_lister(
             self.aims_data_dir, self.n_tier, validation_check_aims
         )
-        results = Parallel(n_jobs=self.n_jobs)(
-            delayed(worker)(dir_name)
-            for dir_name in tqdm(data_dir_lister, desc="Data")
-        ) # -1 if not have aims.out, 0 if have aims.out and get the fermi level
+        results = parallel_map(worker, data_dir_lister, n_jobs=self.n_jobs, desc="Data") # -1 if not have aims.out, 0 if have aims.out and get the fermi level
         # Count errors
         n_err = sum(1 for r in results if r is not None and r != 0)
         if n_err > 0:

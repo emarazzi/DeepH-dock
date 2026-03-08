@@ -9,9 +9,9 @@ rm -rf inputs
 cp -rL inputs.clean inputs
 
 echo "[do] Running commands in ${script_relative_path} ..."
-dock analyze dataset edge inputs -t 0 -p 4
+dock analyze dataset edge inputs -t 0 -j 4
 sleep 1
-dock analyze dataset split inputs -t 0 -p 4
+dock analyze dataset split inputs -t 0 -j 4
 sleep 1
 echo "[done] Running commands"
 

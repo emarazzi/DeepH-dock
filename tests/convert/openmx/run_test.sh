@@ -8,7 +8,7 @@ cd ${script_path}
 rm -rf deeph
 
 echo "[do] Running commands in ${script_relative_path} ..."
-dock convert openmx to-deeph openmx.bak deeph -t 0 -p 2
+dock convert openmx to-deeph openmx.bak deeph -t 0 -j 2
 sleep 1
 echo "[done] Running commands"
 

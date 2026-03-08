@@ -9,15 +9,15 @@ rm -rf infer
 cp -rL infer.clean infer
 
 echo "[do] Running commands in ${script_relative_path} ..."
-dock analyze error entries infer/dft -b benchmark.bak/dft -t 0 -p 4 --cache-res
+dock analyze error entries infer/dft -b benchmark.bak/dft -t 0 -j 4 --cache-res
 sleep 1
-dock analyze error orbital infer/dft -b benchmark.bak/dft -t 0 -p 4 --cache-res
+dock analyze error orbital infer/dft -b benchmark.bak/dft -t 0 -j 4 --cache-res
 sleep 1
-dock analyze error element-pair infer/dft -b benchmark.bak/dft -t 0 -p 4 --cache-res
+dock analyze error element-pair infer/dft -b benchmark.bak/dft -t 0 -j 4 --cache-res
 sleep 1
-dock analyze error element infer/dft -b benchmark.bak/dft -t 0 -p 4 --cache-res --E-range 0.05 0.2
+dock analyze error element infer/dft -b benchmark.bak/dft -t 0 -j 4 --cache-res --E-range 0.05 0.2
 sleep 1
-dock analyze error structure infer/dft -b benchmark.bak/dft -t 0 -p 4 --cache-res
+dock analyze error structure infer/dft -b benchmark.bak/dft -t 0 -j 4 --cache-res
 sleep 1
 echo "[done] Running commands"
 

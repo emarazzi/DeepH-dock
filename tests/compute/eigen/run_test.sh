@@ -10,9 +10,9 @@ cp -rL eigen.clean eigen
 
 echo "[do] Running commands in ${script_relative_path} ..."
 for d1 in $(ls eigen); do
-  dock compute eigen find-fermi eigen/$d1 -d 0.1 -p 16
-  dock compute eigen calc-dos eigen/$d1 -d 0.03 --energy-window -2.0 2.0 --energy-num 1000 -s 0.04 -p 16
-  dock compute eigen calc-band eigen/$d1 -p 16
+  dock compute eigen find-fermi eigen/$d1 -d 0.1 -j 16
+  dock compute eigen calc-dos eigen/$d1 -d 0.03 --energy-window -2.0 2.0 --energy-num 1000 -s 0.04 -j 16
+  dock compute eigen calc-band eigen/$d1 -j 16
   dock compute eigen plot-band eigen/$d1 --energy-window -2.0 2.0
 done
 sleep 1

@@ -8,15 +8,15 @@ cd ${script_path}
 rm -rf legacy updated standardize minus_core
 
 echo "[do] Running commands in ${script_relative_path} ..."
-dock convert deeph upgrade legacy.bak updated -t 0 -p 2
+dock convert deeph upgrade legacy.bak updated -t 0 -j 2
 sleep 1
-dock convert deeph downgrade updated.bak legacy -t 0 -p 2
+dock convert deeph downgrade updated.bak legacy -t 0 -j 2
 sleep 1
 cp -r updated standardize
-dock convert deeph standardize standardize --overwrite -t 0 -p 2
+dock convert deeph standardize standardize --overwrite -t 0 -j 2
 sleep 1
 for d1 in $(ls updated); do
-  dock convert deeph minus-core updated/$d1 minus_core/$d1 single_atoms.bak -t -1 -p 1
+  dock convert deeph minus-core updated/$d1 minus_core/$d1 single_atoms.bak -t -1 -j 1
 done
 sleep 1
 echo "[done] Running commands"

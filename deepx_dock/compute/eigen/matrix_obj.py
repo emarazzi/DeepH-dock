@@ -8,13 +8,10 @@ from DeepH format files.
 
 from pathlib import Path
 import h5py
-import os
 import threadpoolctl
-
 import numpy as np
-from tqdm import tqdm
-from joblib import Parallel, delayed
 
+from deepx_dock.parallel import parallel_map
 from deepx_dock.misc import load_json_file, load_poscar_file
 from deepx_dock.CONSTANT import DEEPX_POSCAR_FILENAME
 from deepx_dock.CONSTANT import DEEPX_INFO_FILENAME
@@ -179,7 +176,7 @@ class AOMatrixObj:
             assert self.R_quantity == len(mats), f"Mismatch: R_quantity={self.R_quantity}, mats_len={len(mats)}"
 
     @classmethod
-    def from_kspace(cls, info_dir_path, AOMatrixK_obj, matrix_type="hamiltonian", r_process_num=1, thread_num=None):
+    def from_kspace(cls, info_dir_path, AOMatrixK_obj, matrix_type="hamiltonian", n_jobs=-1, parallel_k=True):
         """
         Construct a real-space AOMatrixObj from a k-space AOMatrixK object.
 
@@ -198,17 +195,26 @@ class AOMatrixObj:
         matrix_type : str, optional
             Type of the matrix. Default is "hamiltonian".
 
-        r_process_num : int, optional
-            Number of parallel processes. Default is 1.
+        n_jobs : int, optional
+            Number of parallel workers. Default is -1 (auto-detect).
+            - If parallel_k=True: number of R-chunks to process in parallel.
+            - If parallel_k=False: number of BLAS threads for k2r.
 
-        thread_num : int, optional
-            Number of BLAS threads per process. Default is 1.
+        parallel_k : bool, optional
+            Parallelization strategy. Default is True.
+            - True: Multiple R-chunks in parallel, each with 1 BLAS thread.
+            - False: R-chunks processed sequentially with n_jobs BLAS threads.
 
         Returns
         -------
         AOMatrixObj
             A new instance with real-space matrices.
         """
+        import os
+
+        if n_jobs < 0:
+            n_jobs = os.cpu_count() or 1
+
         obj = cls(info_dir_path, matrix_type=matrix_type)
 
         Rs = obj.Rijk_list
@@ -218,23 +224,23 @@ class AOMatrixObj:
         def process_r_chunk(rs_chunk):
             return AOMatrixK_obj.k2r(rs_chunk)
 
-        if thread_num is None:
-            thread_num = int(os.environ.get("OPENBLAS_NUM_THREADS", "1"))
-
-        with threadpoolctl.threadpool_limits(limits=thread_num, user_api="blas"):
-            if r_process_num == 1:
-                mats = AOMatrixK_obj.k2r(Rs)
-            else:
-                if len(Rs) > 0:
-                    n_chunks = r_process_num * 4
-                    rs_chunks = np.array_split(Rs, n_chunks)
-
-                    results = Parallel(n_jobs=r_process_num)(
-                        delayed(process_r_chunk)(chunk) for chunk in tqdm(rs_chunks, leave=False, desc="K to R")
-                    )
-                    mats = np.concatenate(results, axis=0)
+        if parallel_k:
+            n_blas_threads = 1
+            with threadpoolctl.threadpool_limits(limits=n_blas_threads, user_api="blas"):
+                if n_jobs == 1:
+                    mats = AOMatrixK_obj.k2r(Rs)
                 else:
-                    mats = np.zeros((0, obj.orbits_quantity, obj.orbits_quantity))
+                    if len(Rs) > 0:
+                        n_chunks = n_jobs * 4
+                        rs_chunks = np.array_split(Rs, n_chunks)
+                        results = parallel_map(process_r_chunk, rs_chunks, n_jobs=n_jobs, desc="K to R")
+                        mats = np.concatenate(results, axis=0)
+                    else:
+                        mats = np.zeros((0, obj.orbits_quantity, obj.orbits_quantity))
+        else:
+            n_blas_threads = n_jobs
+            with threadpoolctl.threadpool_limits(limits=n_blas_threads, user_api="blas"):
+                mats = AOMatrixK_obj.k2r(Rs)
 
         obj.mats = mats
 
