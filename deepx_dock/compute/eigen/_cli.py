@@ -21,10 +21,9 @@ from deepx_dock.CONSTANT import DEEPX_BAND_FILENAME, DEEPX_K_PATH_FILENAME
             help="Number of parallel workers. Default: -1 (auto-detect CPU cores).",
         ),
         click.option(
-            "--parallel-k",
+            "--blas-parallel-mode",
             is_flag=True,
-            default=True,
-            help="Use parallel k-point mode (default). If not set, use multi-threaded BLAS mode.",
+            help="Use BLAS multi-threaded mode instead of parallel k-point mode (default).",
         ),
         click.option("--sparse-calc", is_flag=True, help="Use sparse diagonalization."),
         click.option("--num-band", type=int, default=50, help="Number of bands when using sparse diagonalization."),
@@ -64,7 +63,7 @@ from deepx_dock.CONSTANT import DEEPX_BAND_FILENAME, DEEPX_K_PATH_FILENAME
 def calc_band(
     data_path,
     jobs_num,
-    parallel_k,
+    blas_parallel_mode,
     num_band,
     e_min,
     maxiter,
@@ -97,6 +96,7 @@ def calc_band(
     elif ill_method_arg == "orbital":
         ill_method_arg = "orbital_removal"
 
+    parallel_k = not blas_parallel_mode
     bd_gen.calc_band_data(
         n_jobs=jobs_num,
         parallel_k=parallel_k,
@@ -151,10 +151,9 @@ def plot_band_data(data_path, energy_window):
             help="Number of parallel workers. Default: -1 (auto-detect CPU cores).",
         ),
         click.option(
-            "--parallel-k",
+            "--blas-parallel-mode",
             is_flag=True,
-            default=True,
-            help="Use parallel k-point mode (default). If not set, use multi-threaded BLAS mode.",
+            help="Use BLAS multi-threaded mode instead of parallel k-point mode (default).",
         ),
         click.option(
             "--method",
@@ -194,7 +193,7 @@ def plot_band_data(data_path, energy_window):
 def find_fermi_energy(
     data_path,
     jobs_num,
-    parallel_k,
+    blas_parallel_mode,
     method,
     kp_density,
     cache_res,
@@ -226,6 +225,7 @@ def find_fermi_energy(
             fermi_energy=obj_H.fermi_energy,
         )
 
+    parallel_k = not blas_parallel_mode
     fd_fermi = FermiEnergyAndDOSGenerator(data_path, obj_H, ill_handler=ill_handler)
     fd_fermi.find_fermi_energy(dk=kp_density, n_jobs=jobs_num, parallel_k=parallel_k, method=method)
     fd_fermi.dump_fermi_energy()
@@ -249,10 +249,9 @@ def find_fermi_energy(
             help="Number of parallel workers. Default: -1 (auto-detect CPU cores).",
         ),
         click.option(
-            "--parallel-k",
+            "--blas-parallel-mode",
             is_flag=True,
-            default=True,
-            help="Use parallel k-point mode (default). If not set, use multi-threaded BLAS mode.",
+            help="Use BLAS multi-threaded mode instead of parallel k-point mode (default).",
         ),
         click.option(
             "--method",
@@ -301,7 +300,7 @@ def find_fermi_energy(
 def calc_dos_from_H(
     data_path,
     jobs_num,
-    parallel_k,
+    blas_parallel_mode,
     method,
     kp_density,
     energy_window,
@@ -336,6 +335,7 @@ def calc_dos_from_H(
             fermi_energy=obj_H.fermi_energy,
         )
 
+    parallel_k = not blas_parallel_mode
     fd_fermi = FermiEnergyAndDOSGenerator(data_path, obj_H, ill_handler=ill_handler)
     fermi_method = "counting" if method == "gaussian" else method
     fd_fermi.find_fermi_energy(dk=kp_density, n_jobs=jobs_num, parallel_k=parallel_k, method=fermi_method)
