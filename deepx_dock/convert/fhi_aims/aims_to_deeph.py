@@ -252,10 +252,17 @@ def _parse_basis(aims_dir_path: Path, atomic_num: int, species: list[str], sort_
 
     orbit_quantity_list:list[int] = [int(0)] * N_atom   # for matrix info
     # Sort indices based on keys: l > n > atom_index > m > basis_type
+    # now, not sort.
+    '''
     _sorted_indices = sorted(range(basis_indices.shape[0]), 
                              key=lambda k: (basis_indices[k,3], basis_indices[k,2],
                                             basis_indices[k,1], basis_indices[k,4],
                                             BASIS_TYPE_ORDER[basis_types[k]]))
+
+    '''
+    # NOT USE SORT!
+    _sorted_indices = range(N_orb)
+    
     atom_elem_dict:dict[str, int] = collections.Counter(species)  # for POSCAR
     _elem_orb_map:dict[int, list[str]] = {}
     elem_orb_map:dict[str, list[int]] = {}
@@ -382,7 +389,7 @@ column_index_hamiltonian
     col_idx -= 1            # not have index <0
 
     return n_ham_size, n_cells, n_basis, \
-            np.array(cell_indices, dtype=int), \
+            -np.array(cell_indices, dtype=int), \
             start_idx_matrix, end_idx_matrix, col_idx
 
 def _read_mx_val(file_path: Path, n_ham_size: int):
