@@ -8,10 +8,13 @@ from DeepH format files.
 
 from pathlib import Path
 import h5py
+import os
 import threadpoolctl
-import numpy as np
 
-from deepx_dock.parallel import parallel_map
+import numpy as np
+from tqdm import tqdm
+from joblib import Parallel, delayed
+
 from deepx_dock.misc import load_json_file, load_poscar_file
 from deepx_dock.CONSTANT import DEEPX_POSCAR_FILENAME
 from deepx_dock.CONSTANT import DEEPX_INFO_FILENAME
@@ -176,7 +179,7 @@ class AOMatrixObj:
             assert self.R_quantity == len(mats), f"Mismatch: R_quantity={self.R_quantity}, mats_len={len(mats)}"
 
     @classmethod
-    def from_kspace(cls, info_dir_path, AOMatrixK_obj, matrix_type="hamiltonian", n_jobs=-1, parallel_k=True):
+    def from_kspace(cls, info_dir_path, AOMatrixK_obj, matrix_type="hamiltonian", r_process_num=1, thread_num=None):
         """
         Construct a real-space AOMatrixObj from a k-space AOMatrixK object.
 
@@ -195,26 +198,17 @@ class AOMatrixObj:
         matrix_type : str, optional
             Type of the matrix. Default is "hamiltonian".
 
-        n_jobs : int, optional
-            Number of parallel workers. Default is -1 (auto-detect).
-            - If parallel_k=True: number of R-chunks to process in parallel.
-            - If parallel_k=False: number of BLAS threads for k2r.
+        r_process_num : int, optional
+            Number of parallel processes. Default is 1.
 
-        parallel_k : bool, optional
-            Parallelization strategy. Default is True.
-            - True: Multiple R-chunks in parallel, each with 1 BLAS thread.
-            - False: R-chunks processed sequentially with n_jobs BLAS threads.
+        thread_num : int, optional
+            Number of BLAS threads per process. Default is 1.
 
         Returns
         -------
         AOMatrixObj
             A new instance with real-space matrices.
         """
-        import os
-
-        if n_jobs < 0:
-            n_jobs = os.cpu_count() or 1
-
         obj = cls(info_dir_path, matrix_type=matrix_type)
 
         Rs = obj.Rijk_list
@@ -224,23 +218,23 @@ class AOMatrixObj:
         def process_r_chunk(rs_chunk):
             return AOMatrixK_obj.k2r(rs_chunk)
 
-        if parallel_k:
-            n_blas_threads = 1
-            with threadpoolctl.threadpool_limits(limits=n_blas_threads, user_api="blas"):
-                if n_jobs == 1:
-                    mats = AOMatrixK_obj.k2r(Rs)
-                else:
-                    if len(Rs) > 0:
-                        n_chunks = n_jobs * 4
-                        rs_chunks = np.array_split(Rs, n_chunks)
-                        results = parallel_map(process_r_chunk, rs_chunks, n_jobs=n_jobs, desc="K to R")
-                        mats = np.concatenate(results, axis=0)
-                    else:
-                        mats = np.zeros((0, obj.orbits_quantity, obj.orbits_quantity))
-        else:
-            n_blas_threads = n_jobs
-            with threadpoolctl.threadpool_limits(limits=n_blas_threads, user_api="blas"):
+        if thread_num is None:
+            thread_num = int(os.environ.get("OPENBLAS_NUM_THREADS", "1"))
+
+        with threadpoolctl.threadpool_limits(limits=thread_num, user_api="blas"):
+            if r_process_num == 1:
                 mats = AOMatrixK_obj.k2r(Rs)
+            else:
+                if len(Rs) > 0:
+                    n_chunks = r_process_num * 4
+                    rs_chunks = np.array_split(Rs, n_chunks)
+
+                    results = Parallel(n_jobs=r_process_num)(
+                        delayed(process_r_chunk)(chunk) for chunk in tqdm(rs_chunks, leave=False, desc="K to R")
+                    )
+                    mats = np.concatenate(results, axis=0)
+                else:
+                    mats = np.zeros((0, obj.orbits_quantity, obj.orbits_quantity))
 
         obj.mats = mats
 
@@ -524,6 +518,105 @@ class AOMatrixObj:
         Mks_flat = np.matmul(phase, MRs_flat)
         return Mks_flat.reshape(len(ks), *self.mats.shape[1:])
 
+    def _serialize_entries(self, matrix_type: str):
+        """
+        Serialize in-memory real-space matrices into DeepH HDF5 chunks.
+
+        Parameters
+        ----------
+        matrix_type : str
+            One of "hamiltonian", "overlap", or "density_matrix".
+
+        Returns
+        -------
+        atom_pairs : np.ndarray, shape (N_pairs, 5)
+        chunk_boundaries : np.ndarray, shape (N_pairs + 1,)
+        chunk_shapes : np.ndarray, shape (N_pairs, 2)
+        entries : np.ndarray, shape (M,)
+        """
+        if self.mats is None:
+            raise ValueError("No matrix data available in self.mats")
+        if self.atom_pairs is None:
+            raise ValueError("No atom_pairs metadata available for serialization")
+
+        matrix_type = str(matrix_type)
+        if matrix_type not in ("hamiltonian", "overlap", "density_matrix"):
+            raise ValueError(f"Invalid matrix_type: {matrix_type}")
+
+        # Fast map from R tuple to index in self.mats
+        r_to_idx = {tuple(int(v) for v in r): i for i, r in enumerate(self.Rijk_list)}
+
+        atom_pairs = np.asarray(self.atom_pairs, dtype=np.int64)
+        n_pairs = len(atom_pairs)
+        chunk_shapes = np.zeros((n_pairs, 2), dtype=np.int64)
+        chunk_boundaries = np.zeros(n_pairs + 1, dtype=np.int64)
+
+        chunks = []
+        for i_ap, ap in enumerate(atom_pairs):
+            Rijk = (int(ap[0]), int(ap[1]), int(ap[2]))
+            i_atom = int(ap[3])
+            j_atom = int(ap[4])
+
+            i0 = int(self.atom_num_orbits_cumsum[i_atom])
+            i1 = int(self.atom_num_orbits_cumsum[i_atom + 1])
+            j0 = int(self.atom_num_orbits_cumsum[j_atom])
+            j1 = int(self.atom_num_orbits_cumsum[j_atom + 1])
+
+            try:
+                mat_R = self.mats[r_to_idx[Rijk]]
+            except KeyError as exc:
+                raise KeyError(f"R vector {Rijk} from atom_pairs is not present in self.Rijk_list") from exc
+
+            if matrix_type in ("hamiltonian", "density_matrix") and self.spinful:
+                # Rebuild [up-up, up-dn; dn-up, dn-dn] block expected by HDF5 format.
+                upup = mat_R[i0:i1, j0:j1]
+                updn = mat_R[i0:i1, j0 + self.orbits_quantity : j1 + self.orbits_quantity]
+                dnup = mat_R[i0 + self.orbits_quantity : i1 + self.orbits_quantity, j0:j1]
+                dndn = mat_R[
+                    i0 + self.orbits_quantity : i1 + self.orbits_quantity,
+                    j0 + self.orbits_quantity : j1 + self.orbits_quantity,
+                ]
+                chunk = np.block([[upup, updn], [dnup, dndn]])
+            else:
+                # Overlap is stored without explicit spin blocks in DeepH format.
+                chunk = mat_R[i0:i1, j0:j1]
+
+            chunk_shapes[i_ap] = np.array(chunk.shape, dtype=np.int64)
+            chunk_boundaries[i_ap + 1] = chunk_boundaries[i_ap] + int(chunk.size)
+            chunks.append(chunk.reshape(-1))
+
+        if chunks:
+            entries = np.concatenate(chunks)
+        else:
+            # Keep dtype compatible with the in-memory matrix.
+            entries = np.array([], dtype=self.mats.dtype)
+
+        return atom_pairs, chunk_boundaries, chunk_shapes, entries
+
+    def dump_matrix_h5(self, file_path, matrix_type: str = "hamiltonian"):
+        """
+        Dump current in-memory matrix into a DeepH-format HDF5 file.
+
+        This is useful when you modify `self.mats` (real-space H(R)/S(R)/rho(R))
+        and want to save it back to disk for further DeepH workflows.
+
+        Parameters
+        ----------
+        file_path : str or Path
+            Output HDF5 path.
+        matrix_type : str, optional
+            One of "hamiltonian", "overlap", or "density_matrix".
+            Default is "hamiltonian".
+        """
+        atom_pairs, chunk_boundaries, chunk_shapes, entries = self._serialize_entries(matrix_type)
+
+        file_path = Path(file_path)
+        with h5py.File(file_path, "w") as h5file:
+            h5file.create_dataset("atom_pairs", data=atom_pairs)
+            h5file.create_dataset("chunk_boundaries", data=chunk_boundaries)
+            h5file.create_dataset("chunk_shapes", data=chunk_shapes)
+            h5file.create_dataset("entries", data=np.real(entries))
+       
     def assert_compatible(self, other):
         """
         Assert that another AOMatrixObj is structurally compatible.
