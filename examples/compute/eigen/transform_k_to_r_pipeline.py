@@ -773,18 +773,35 @@ def apply_custom_kspace_transform(
     if Hk.ndim != 3:
         raise ValueError(f"Hk/Sk must have shape (Nk, Nb, Nb), got {Hk.shape}")
 
+    rm = sorted(set(int(i) for i in remove_indices))
+    if len(rm) == 0:
+        return Hk, Sk
+
+    Tk, _, _ = build_elimination_tk(Sk, rm)
+    Hk_new, Sk_new = apply_tk_projection(Hk, Sk, Tk)
+    return Hk_new, Sk_new
+
+
+def build_elimination_tk(
+    Sk: np.ndarray,
+    remove_indices: list[int],
+) -> tuple[np.ndarray, list[int], list[int]]:
+    """Build elimination transform T(k) for removing a set of orbitals."""
+    if Sk.ndim != 3:
+        raise ValueError(f"Sk must have shape (Nk, Nb, Nb), got {Sk.shape}")
+
     nk, nb, nb2 = Sk.shape
     if nb != nb2:
         raise ValueError(f"Sk must be square in last two dims, got {Sk.shape}")
 
     rm = sorted(set(int(i) for i in remove_indices))
     if len(rm) == 0:
-        return Hk, Sk
+        eye = np.eye(nb, dtype=np.complex128)
+        return np.broadcast_to(eye, (nk, nb, nb)).copy(), list(range(nb)), []
     if rm[0] < 0 or rm[-1] >= nb:
         raise ValueError(f"remove_indices out of range for Nb={nb}: {rm}")
 
     keep = [i for i in range(nb) if i not in rm]
-    nr = len(rm)
     nkp = len(keep)
     if nkp == 0:
         raise ValueError("Cannot remove all orbitals")
@@ -795,14 +812,143 @@ def apply_custom_kspace_transform(
     S_mk = Sk[:, rm, :][:, :, keep]
     coeff = -np.linalg.solve(S_mm, S_mk)
 
-    T = np.zeros((nk, nb, nkp), dtype=np.complex128)
-    T[:, keep, :] = np.eye(nkp, dtype=np.complex128)[None, :, :]
-    T[:, rm, :] = coeff
+    Tk = np.zeros((nk, nb, nkp), dtype=np.complex128)
+    Tk[:, keep, :] = np.eye(nkp, dtype=np.complex128)[None, :, :]
+    Tk[:, rm, :] = coeff
+    return Tk, keep, rm
 
-    Tc = np.conjugate(np.swapaxes(T, 1, 2))
-    Hk_new = np.matmul(np.matmul(Tc, Hk), T)
-    Sk_new = np.matmul(np.matmul(Tc, Sk), T)
+
+def apply_tk_projection(
+    Hk: np.ndarray,
+    Sk: np.ndarray,
+    Tk: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Apply H'(k)=T(k)^dagger H(k) T(k), S'(k)=T(k)^dagger S(k) T(k)."""
+    Tc = np.conjugate(np.swapaxes(Tk, 1, 2))
+    Hk_new = np.matmul(np.matmul(Tc, Hk), Tk)
+    Sk_new = np.matmul(np.matmul(Tc, Sk), Tk)
     return Hk_new, Sk_new
+
+
+def k_to_r_operator(
+    ks: np.ndarray,
+    Rijk_list: np.ndarray,
+    Mk: np.ndarray,
+    weights: np.ndarray | None = None,
+) -> np.ndarray:
+    """Inverse transform operator blocks from k-space to real-space on a target R list."""
+    ks = np.asarray(ks, dtype=float)
+    Rs = np.asarray(Rijk_list, dtype=float)
+    Mk = np.asarray(Mk)
+
+    if ks.ndim != 2 or ks.shape[1] != 3:
+        raise ValueError(f"ks must have shape (Nk, 3), got {ks.shape}")
+    if Rs.ndim != 2 or Rs.shape[1] != 3:
+        raise ValueError(f"Rijk_list must have shape (NR, 3), got {Rs.shape}")
+    if Mk.ndim != 3:
+        raise ValueError(f"Mk must have shape (Nk, Nrow, Ncol), got {Mk.shape}")
+    if Mk.shape[0] != ks.shape[0]:
+        raise ValueError(f"Nk mismatch between ks and Mk: {ks.shape[0]} vs {Mk.shape[0]}")
+
+    nk = ks.shape[0]
+    if weights is None:
+        w = np.full(nk, 1.0 / nk, dtype=float)
+    else:
+        w = np.asarray(weights, dtype=float)
+        if w.ndim != 1 or w.shape[0] != nk:
+            raise ValueError(f"weights must have shape (Nk,), got {w.shape}")
+
+    phase = np.exp(-2j * np.pi * np.matmul(Rs, ks.T))
+    wr = phase * w[None, :]
+
+    Mk_flat = Mk.reshape(nk, -1)
+    MR_flat = np.matmul(wr, Mk_flat)
+    return MR_flat.reshape(len(Rs), Mk.shape[1], Mk.shape[2])
+
+
+def project_real_space_via_convolution(
+    mats_R: np.ndarray,
+    T_R: np.ndarray,
+    Rijk_list: np.ndarray,
+) -> np.ndarray:
+    """Project real-space blocks via convolution with T(R)."""
+    mats_R = np.asarray(mats_R)
+    T_R = np.asarray(T_R)
+    Rijk_list = np.asarray(Rijk_list)
+
+    if mats_R.ndim != 3:
+        raise ValueError(f"mats_R must have shape (NR, Nb, Nb), got {mats_R.shape}")
+    if T_R.ndim != 3:
+        raise ValueError(f"T_R must have shape (NR, Nb, Nkp), got {T_R.shape}")
+    if mats_R.shape[0] != T_R.shape[0]:
+        raise ValueError(f"NR mismatch between mats_R and T_R: {mats_R.shape[0]} vs {T_R.shape[0]}")
+    if mats_R.shape[1] != T_R.shape[1]:
+        raise ValueError(f"Nb mismatch between mats_R and T_R: {mats_R.shape[1]} vs {T_R.shape[1]}")
+    if Rijk_list.shape[0] != mats_R.shape[0]:
+        raise ValueError(f"Rijk_list size mismatch: {Rijk_list.shape[0]} vs {mats_R.shape[0]}")
+
+    nr, _, nkp = T_R.shape
+    out = np.zeros((nr, nkp, nkp), dtype=np.complex128)
+
+    r_keys = [tuple(int(v) for v in row) for row in Rijk_list]
+    r_to_idx = {r: i for i, r in enumerate(r_keys)}
+
+    for i_rp, rp in enumerate(r_keys):
+        acc = np.zeros((nkp, nkp), dtype=np.complex128)
+        for i_r1, r1 in enumerate(r_keys):
+            Tl = np.conjugate(T_R[i_r1].T)
+            r_mid_offset = (rp[0] + r1[0], rp[1] + r1[1], rp[2] + r1[2])
+            for i_r2, r2 in enumerate(r_keys):
+                r_mid = (
+                    r_mid_offset[0] - r2[0],
+                    r_mid_offset[1] - r2[1],
+                    r_mid_offset[2] - r2[2],
+                )
+                i_mid = r_to_idx.get(r_mid)
+                if i_mid is None:
+                    continue
+                acc += Tl @ mats_R[i_mid] @ T_R[i_r2]
+        out[i_rp] = acc
+
+    return out
+
+
+def apply_custom_realspace_convolution_projection(
+    ks: np.ndarray,
+    Rijk_list: np.ndarray,
+    HR: np.ndarray,
+    SR: np.ndarray,
+    Sk: np.ndarray,
+    remove_indices: list[int],
+    weights: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[int]]:
+    """Build T(k), transform to T(R), then project H(R)/S(R) via real-space convolution."""
+    Tk, keep, _ = build_elimination_tk(Sk, remove_indices)
+    TR = k_to_r_operator(ks=ks, Rijk_list=Rijk_list, Mk=Tk, weights=weights)
+
+    HR_proj = project_real_space_via_convolution(HR, TR, Rijk_list)
+    SR_proj = project_real_space_via_convolution(SR, TR, Rijk_list)
+    return HR_proj, SR_proj, Tk, TR, keep
+
+
+def save_t_matrices(
+    output_dir: Path,
+    ks: np.ndarray,
+    Rijk_list: np.ndarray,
+    Tk: np.ndarray,
+    TR: np.ndarray,
+) -> None:
+    """Save T matrices in reciprocal and real space for comparison."""
+    np.savez_compressed(
+        output_dir / "T_matrices_kspace.npz",
+        ks=np.asarray(ks, dtype=float),
+        T_k=np.asarray(Tk),
+    )
+    np.savez_compressed(
+        output_dir / "T_matrices_rspace.npz",
+        Rijk_list=np.asarray(Rijk_list, dtype=int),
+        T_R=np.asarray(TR),
+    )
 
 
 def dump_reduced_matrix_h5(
@@ -919,6 +1065,7 @@ def run_pipeline(
     safe_threshold: float = 0.01,
     marginal_threshold: float = 0.05,
     suggest_max_steps: int = 8,
+    project_via_rspace_convolution: bool = False,
 ) -> None:
     """Load H/S, apply k-space transform, map back to R-space, and dump files."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1012,9 +1159,39 @@ def run_pipeline(
         print_companion_removal_suggestion(suggestion)
         return
 
-    Hk_new, Sk_new = apply_custom_kspace_transform(Hk, Sk, remove_indices=rm)
+    if project_via_rspace_convolution:
+        if obj.Rijk_list is None:
+            raise ValueError("Rijk_list is None")
+        HR0 = obj.HR
+        SR0 = obj.SR
+        if HR0 is None or SR0 is None:
+            raise ValueError("HR/SR is None")
 
-    HR_new, SR_new = obj.Hk_and_Sk_to_real(ks=ks, Hk=Hk_new, Sk=Sk_new)
+        Hk_new, Sk_new = apply_custom_kspace_transform(Hk, Sk, remove_indices=rm)
+        HR_ref, SR_ref = obj.Hk_and_Sk_to_real(ks=ks, Hk=Hk_new, Sk=Sk_new)
+
+        HR_new, SR_new, Tk, TR, _ = apply_custom_realspace_convolution_projection(
+            ks=ks,
+            Rijk_list=obj.Rijk_list,
+            HR=HR0,
+            SR=SR0,
+            Sk=Sk,
+            remove_indices=rm,
+            weights=None,
+        )
+        save_t_matrices(output_dir, ks, obj.Rijk_list, Tk, TR)
+
+        hr_diff = float(np.max(np.abs(HR_new - HR_ref))) if HR_new.size > 0 else 0.0
+        sr_diff = float(np.max(np.abs(SR_new - SR_ref))) if SR_new.size > 0 else 0.0
+        print(
+            "\n-- Real-space convolution projection check against k-space route --"
+        )
+        print(f"   max|HR_conv - HR_kft| = {hr_diff:.4e}")
+        print(f"   max|SR_conv - SR_kft| = {sr_diff:.4e}")
+        print("   Saved T(k) and T(R) as T_matrices_kspace.npz / T_matrices_rspace.npz")
+    else:
+        Hk_new, Sk_new = apply_custom_kspace_transform(Hk, Sk, remove_indices=rm)
+        HR_new, SR_new = obj.Hk_and_Sk_to_real(ks=ks, Hk=Hk_new, Sk=Sk_new)
 
     if obj.Rijk_list is None:
         raise ValueError("Rijk_list is None")
@@ -1171,6 +1348,15 @@ if __name__ == "__main__":
         default=8,
         help="Maximum number of greedy companion-removal steps to take (default: 8).",
     )
+    parser.add_argument(
+        "--project-via-rspace-convolution",
+        action="store_true",
+        help=(
+            "Build T(k), inverse-transform it to T(R), then compute projected H'(R)/S'(R) "
+            "via full real-space convolution. Also saves T matrices in k-space and real-space "
+            "as NPZ files and prints the numerical mismatch against the k-space-then-FT route."
+        ),
+    )
 
     args = parser.parse_args()
     run_pipeline(
@@ -1189,4 +1375,5 @@ if __name__ == "__main__":
         safe_threshold=args.safe_threshold,
         marginal_threshold=args.marginal_threshold,
         suggest_max_steps=args.suggest_max_steps,
+        project_via_rspace_convolution=args.project_via_rspace_convolution,
     )
