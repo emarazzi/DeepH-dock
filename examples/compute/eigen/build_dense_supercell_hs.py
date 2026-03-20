@@ -18,6 +18,7 @@ If --supercell is omitted, it is inferred from Rijk_list as
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 from pathlib import Path
 import re
@@ -258,8 +259,8 @@ def build_sparse_supercell_hs(
         s_col = np.array([], dtype=np.int64)
         s_val = np.array([], dtype=SR.dtype)
 
-    H_sparse = sparse.coo_matrix((h_val, (h_row, h_col)), shape=(dim, dim)).tocsr()
-    S_sparse = sparse.coo_matrix((s_val, (s_row, s_col)), shape=(dim, dim)).tocsr()
+    H_sparse = sparse.csr_matrix((h_val, (h_row, h_col)), shape=(dim, dim))
+    S_sparse = sparse.csr_matrix((s_val, (s_row, s_col)), shape=(dim, dim))
     H_sparse.sum_duplicates()
     S_sparse.sum_duplicates()
     return H_sparse, S_sparse
@@ -299,14 +300,16 @@ def apply_sparse_orbital_mask(
     This is a structural basis reduction (principal submatrix extraction):
     rows/columns of the removed orbitals are dropped consistently across all cells.
     """
-    if H_sparse.shape[0] != H_sparse.shape[1]:
-        raise ValueError(f"H_sparse must be square, got {H_sparse.shape}")
-    if S_sparse.shape != H_sparse.shape:
-        raise ValueError(f"S_sparse shape mismatch: {S_sparse.shape} vs {H_sparse.shape}")
+    h_nrow, h_ncol = H_sparse.get_shape()
+    s_nrow, s_ncol = S_sparse.get_shape()
+    if h_nrow != h_ncol:
+        raise ValueError(f"H_sparse must be square, got {(h_nrow, h_ncol)}")
+    if (s_nrow, s_ncol) != (h_nrow, h_ncol):
+        raise ValueError(f"S_sparse shape mismatch: {(s_nrow, s_ncol)} vs {(h_nrow, h_ncol)}")
     if norb_per_cell <= 0:
         raise ValueError(f"norb_per_cell must be positive, got {norb_per_cell}")
 
-    dim = int(H_sparse.shape[0])
+    dim = int(h_nrow)
     if dim % norb_per_cell != 0:
         raise ValueError(
             f"Sparse size {dim} is not divisible by norb_per_cell={norb_per_cell}"
@@ -336,8 +339,8 @@ def apply_sparse_orbital_mask(
     if keep_global.size == 0:
         raise ValueError("Cannot remove all orbitals in sparse basis")
 
-    H_new = H_sparse[keep_global, :][:, keep_global].tocsr()
-    S_new = S_sparse[keep_global, :][:, keep_global].tocsr()
+    H_new = sparse.csr_matrix(H_sparse[keep_global, :][:, keep_global])
+    S_new = sparse.csr_matrix(S_sparse[keep_global, :][:, keep_global])
 
     meta = {
         "ncell": int(ncell),
@@ -481,6 +484,324 @@ def apply_realspace_dense_t_transform(
         "reduced_index_to_cell_orbital": reduced_index_to_cell_orbital,
     }
     return H_new, S_new, T_dense, meta
+
+
+def _evaluate_schur_set_safety(
+    S_dense: np.ndarray,
+    norb_per_cell: int,
+    remove_orbitals_unit: list[int],
+    eig_tol: float,
+    cond_max: float,
+    reduced_cond_max: float,
+    herm_rel_tol: float,
+    removal_map: dict[str, object] | None = None,
+) -> tuple[bool, dict[str, object]]:
+    """Evaluate numerical safety of a Schur elimination set on dense overlap."""
+    S = np.asarray(S_dense)
+    if S.ndim != 2 or S.shape[0] != S.shape[1]:
+        raise ValueError(f"S_dense must be square 2D, got {S.shape}")
+    if norb_per_cell <= 0:
+        raise ValueError(f"norb_per_cell must be positive, got {norb_per_cell}")
+
+    dim = int(S.shape[0])
+    if dim % norb_per_cell != 0:
+        raise ValueError(
+            f"Dense size {dim} is not divisible by norb_per_cell={norb_per_cell}"
+        )
+    ncell = dim // norb_per_cell
+
+    rm_global, _ = _resolve_global_removed_indices(
+        ncell=ncell,
+        norb_per_cell=norb_per_cell,
+        remove_orbitals_unit=remove_orbitals_unit,
+    )
+    keep_global = [i for i in range(dim) if i not in set(rm_global)]
+    if len(keep_global) == 0:
+        return False, {
+            "reason": "all-orbitals-removed",
+            "safe": False,
+            "removal_plan_like": removal_map if removal_map is not None else {},
+        }
+
+    S_mm = S[np.ix_(rm_global, rm_global)]
+    S_mk = S[np.ix_(rm_global, keep_global)]
+    S_kk = S[np.ix_(keep_global, keep_global)]
+
+    S_mm_h = 0.5 * (S_mm + np.conjugate(S_mm.T))
+    mm_norm = float(np.linalg.norm(S_mm_h))
+    mm_anti = float(np.linalg.norm(S_mm - np.conjugate(S_mm.T)))
+    mm_herm_rel = mm_anti / max(mm_norm, 1.0e-30)
+    if mm_herm_rel > herm_rel_tol:
+        return False, {
+            "reason": "s_mm-non-hermitian",
+            "safe": False,
+            "removal_plan_like": removal_map if removal_map is not None else {},
+            "s_mm_hermiticity_rel": mm_herm_rel,
+            "herm_rel_tol": float(herm_rel_tol),
+        }
+
+    eval_mm = np.linalg.eigvalsh(S_mm_h)
+    mm_min = float(np.min(eval_mm)) if eval_mm.size > 0 else float("inf")
+    if mm_min <= eig_tol:
+        return False, {
+            "reason": "s_mm-not-spd",
+            "safe": False,
+            "removal_plan_like": removal_map if removal_map is not None else {},
+            "s_mm_min_eig": mm_min,
+            "eig_tol": float(eig_tol),
+        }
+
+    cond_mm = float(np.linalg.cond(S_mm_h))
+    if not np.isfinite(cond_mm) or cond_mm > cond_max:
+        return False, {
+            "reason": "s_mm-ill-conditioned",
+            "safe": False,
+            "removal_plan_like": removal_map if removal_map is not None else {},
+            "s_mm_cond": cond_mm,
+            "cond_max": float(cond_max),
+            "s_mm_min_eig": mm_min,
+        }
+
+    coeff = np.linalg.solve(S_mm, S_mk)
+    S_red = S_kk - np.conjugate(S_mk.T) @ coeff
+    S_red_h = 0.5 * (S_red + np.conjugate(S_red.T))
+    red_norm = float(np.linalg.norm(S_red_h))
+    red_anti = float(np.linalg.norm(S_red - np.conjugate(S_red.T)))
+    red_herm_rel = red_anti / max(red_norm, 1.0e-30)
+    if red_herm_rel > herm_rel_tol:
+        return False, {
+            "reason": "s_reduced-non-hermitian",
+            "safe": False,
+            "removal_plan_like": removal_map if removal_map is not None else {},
+            "s_mm_min_eig": mm_min,
+            "s_mm_cond": cond_mm,
+            "s_reduced_hermiticity_rel": red_herm_rel,
+            "herm_rel_tol": float(herm_rel_tol),
+        }
+
+    eval_red = np.linalg.eigvalsh(S_red_h)
+    red_min = float(np.min(eval_red)) if eval_red.size > 0 else float("inf")
+    cond_red = float(np.linalg.cond(S_red_h))
+    if not np.isfinite(cond_red) or cond_red > reduced_cond_max:
+        return False, {
+            "reason": "s_reduced-ill-conditioned",
+            "safe": False,
+            "removal_plan_like": removal_map if removal_map is not None else {},
+            "s_mm_min_eig": mm_min,
+            "s_mm_cond": cond_mm,
+            "s_reduced_min_eig": red_min,
+            "s_reduced_cond": cond_red,
+            "reduced_cond_max": float(reduced_cond_max),
+        }
+
+    red_safe = bool(red_min > eig_tol)
+
+    return red_safe, {
+        "reason": "ok" if red_safe else "s_reduced-not-spd",
+        "safe": red_safe,
+        "removal_plan_like": removal_map if removal_map is not None else {},
+        "s_mm_min_eig": mm_min,
+        "s_mm_cond": cond_mm,
+        "s_reduced_min_eig": red_min,
+        "s_reduced_cond": cond_red,
+        "s_reduced_hermiticity_rel": red_herm_rel,
+        "eig_tol": float(eig_tol),
+        "cond_max": float(cond_max),
+        "reduced_cond_max": float(reduced_cond_max),
+        "herm_rel_tol": float(herm_rel_tol),
+    }
+
+
+def _build_removal_plan_like_map(
+    elements: list[str],
+    elements_orbital_map: dict[str, list[int]],
+    remove_orbitals_unit: list[int],
+) -> dict[str, object]:
+    """Build a species/orbital map for removed unit-cell orbital indices."""
+    rm_set = set(int(i) for i in remove_orbitals_unit)
+
+    by_atom: list[dict[str, object]] = []
+    by_element_acc: dict[str, dict[str, set[str]]] = {}
+
+    g0 = 0
+    for ia, el in enumerate(elements):
+        shell_ls = [int(v) for v in elements_orbital_map[el]]
+        shell_count_by_l: dict[int, int] = {}
+
+        atom_orbital_families: set[str] = set()
+        atom_full_shells: set[str] = set()
+        atom_partial_shells: list[dict[str, object]] = []
+
+        for l in shell_ls:
+            shell_n = shell_count_by_l.get(l, 0) + 1
+            shell_count_by_l[l] = shell_n
+
+            shell_dim = 2 * l + 1
+            shell_start = g0
+            shell_stop = g0 + shell_dim
+
+            removed_here = [idx for idx in range(shell_start, shell_stop) if idx in rm_set]
+            if removed_here:
+                label = L_TO_LABEL.get(l, f"l{l}")
+                shell_name = f"{shell_n}{label}"
+                atom_orbital_families.add(label)
+                if len(removed_here) == shell_dim:
+                    atom_full_shells.add(shell_name)
+                else:
+                    atom_partial_shells.append(
+                        {
+                            "shell": shell_name,
+                            "removed_components": int(len(removed_here)),
+                            "shell_dim": int(shell_dim),
+                        }
+                    )
+            g0 = shell_stop
+
+        if atom_orbital_families or atom_full_shells or atom_partial_shells:
+            by_atom.append(
+                {
+                    "target_elements": [str(el)],
+                    "target_atom_indices": [int(ia)],
+                    "remove_orbitals": sorted(atom_orbital_families),
+                    "remove_shells": sorted(atom_full_shells),
+                    "partial_shells": atom_partial_shells,
+                }
+            )
+
+            acc = by_element_acc.setdefault(str(el), {"remove_orbitals": set(), "remove_shells": set()})
+            acc["remove_orbitals"].update(atom_orbital_families)
+            acc["remove_shells"].update(atom_full_shells)
+
+    by_element: list[dict[str, object]] = []
+    for el in sorted(by_element_acc):
+        by_element.append(
+            {
+                "target_elements": [el],
+                "remove_orbitals": sorted(by_element_acc[el]["remove_orbitals"]),
+                "remove_shells": sorted(by_element_acc[el]["remove_shells"]),
+            }
+        )
+
+    return {
+        "rules_by_atom": by_atom,
+        "rules_by_element": by_element,
+    }
+
+
+def analyze_schur_elimination_safety(
+    S_dense: np.ndarray,
+    norb_per_cell: int,
+    elements: list[str],
+    elements_orbital_map: dict[str, list[int]],
+    candidate_orbitals_unit: list[int] | None = None,
+    max_group_size: int = 2,
+    eig_tol: float = 1.0e-8,
+    cond_max: float = 1.0e12,
+    reduced_cond_max: float = 1.0e10,
+    herm_rel_tol: float = 1.0e-10,
+    max_combinations: int = 5000,
+) -> dict[str, object]:
+    """
+    Analyze which orbital-removal sets are numerically safe for Schur elimination.
+
+    The analysis first checks single-orbital removals, then optional grouped removals
+    up to `max_group_size`, and reports combinations that are safe despite containing
+    one or more single-orbital unsafe members.
+    """
+    if max_group_size < 1:
+        raise ValueError(f"max_group_size must be >= 1, got {max_group_size}")
+    if max_combinations <= 0:
+        raise ValueError(f"max_combinations must be positive, got {max_combinations}")
+
+    S = np.asarray(S_dense)
+    if S.ndim != 2 or S.shape[0] != S.shape[1]:
+        raise ValueError(f"S_dense must be square 2D, got {S.shape}")
+    if norb_per_cell <= 0:
+        raise ValueError(f"norb_per_cell must be positive, got {norb_per_cell}")
+
+    if candidate_orbitals_unit is None:
+        candidates = list(range(norb_per_cell))
+    else:
+        candidates = sorted(set(int(i) for i in candidate_orbitals_unit))
+    bad = [i for i in candidates if i < 0 or i >= norb_per_cell]
+    if bad:
+        raise ValueError(
+            f"candidate_orbitals_unit out of range [0, {norb_per_cell - 1}]: {bad}"
+        )
+
+    single_safe: list[int] = []
+    single_safe_details: list[dict[str, object]] = []
+    single_unsafe: list[dict[str, object]] = []
+    single_safe_set: set[int] = set()
+
+    for i in candidates:
+        is_safe, detail = _evaluate_schur_set_safety(
+            S_dense=S,
+            norb_per_cell=norb_per_cell,
+            remove_orbitals_unit=[i],
+            eig_tol=eig_tol,
+            cond_max=cond_max,
+            reduced_cond_max=reduced_cond_max,
+            herm_rel_tol=herm_rel_tol,
+            removal_map=_build_removal_plan_like_map(
+                elements=elements,
+                elements_orbital_map=elements_orbital_map,
+                remove_orbitals_unit=[i],
+            ),
+        )
+        if is_safe:
+            single_safe.append(int(i))
+            single_safe_set.add(int(i))
+            single_safe_details.append(detail)
+        else:
+            single_unsafe.append(detail)
+
+    group_safe_with_unsafe_members: list[dict[str, object]] = []
+    tested_combinations = len(candidates)
+
+    for k in range(2, max_group_size + 1):
+        for group in itertools.combinations(candidates, k):
+            if tested_combinations >= max_combinations:
+                break
+            tested_combinations += 1
+            is_safe, detail = _evaluate_schur_set_safety(
+                S_dense=S,
+                norb_per_cell=norb_per_cell,
+                remove_orbitals_unit=list(group),
+                eig_tol=eig_tol,
+                cond_max=cond_max,
+                reduced_cond_max=reduced_cond_max,
+                herm_rel_tol=herm_rel_tol,
+                removal_map=_build_removal_plan_like_map(
+                    elements=elements,
+                    elements_orbital_map=elements_orbital_map,
+                    remove_orbitals_unit=list(group),
+                ),
+            )
+            if is_safe:
+                has_any_single_unsafe = any(int(i) not in single_safe_set for i in group)
+                if has_any_single_unsafe:
+                    group_safe_with_unsafe_members.append(detail)
+        if tested_combinations >= max_combinations:
+            break
+
+    return {
+        "norb_per_cell": int(norb_per_cell),
+        "candidate_count": int(len(candidates)),
+        "single_safe_count": int(len(single_safe)),
+        "single_safe_details": single_safe_details,
+        "single_unsafe_details": single_unsafe,
+        "safe_groups_with_single_unsafe_members": group_safe_with_unsafe_members,
+        "analysis_params": {
+            "max_group_size": int(max_group_size),
+            "eig_tol": float(eig_tol),
+            "cond_max": float(cond_max),
+            "reduced_cond_max": float(reduced_cond_max),
+            "herm_rel_tol": float(herm_rel_tol),
+            "max_combinations": int(max_combinations),
+            "tested_combinations": int(tested_combinations),
+        },
+    }
 
 
 def dense_to_cell_block_matrix(
@@ -1027,6 +1348,7 @@ def save_transformed_deeph_dataset_sparse(
         removed_indices=removed_unit,
     )
 
+    h_nrow, h_ncol = H_sparse_new.get_shape()
     meta = {
         "supercell": list(supercell),
         "removed_unit_indices": removed_unit,
@@ -1034,7 +1356,7 @@ def save_transformed_deeph_dataset_sparse(
         "selector_resolution": selector_meta,
         "rule_plan_resolution": rule_plan_meta,
         "mode": "sparse",
-        "shape": [int(H_sparse_new.shape[0]), int(H_sparse_new.shape[1])],
+        "shape": [int(h_nrow), int(h_ncol)],
         "H_nnz": int(H_sparse_new.nnz),
         "S_nnz": int(S_sparse_new.nnz),
     }
@@ -1116,6 +1438,53 @@ def _parse_args() -> argparse.Namespace:
             "Each rule may include: target_elements, target_atom_indices, remove_orbitals, remove_shells."
         ),
     )
+    parser.add_argument(
+        "--analyze-schur-safety",
+        action="store_true",
+        help="Analyze which orbital removals are numerically safe for Schur elimination (dense mode only).",
+    )
+    parser.add_argument(
+        "--safety-max-group-size",
+        type=int,
+        default=2,
+        help="Maximum unit-cell removal group size to test in Schur safety analysis.",
+    )
+    parser.add_argument(
+        "--safety-eig-tol",
+        type=float,
+        default=1.0e-8,
+        help="Eigenvalue tolerance used to classify SPD safety in Schur analysis.",
+    )
+    parser.add_argument(
+        "--safety-cond-max",
+        type=float,
+        default=1.0e12,
+        help="Maximum allowed condition number for S_MM in Schur safety analysis.",
+    )
+    parser.add_argument(
+        "--safety-reduced-cond-max",
+        type=float,
+        default=1.0e10,
+        help="Maximum allowed condition number for reduced overlap S' in Schur safety analysis.",
+    )
+    parser.add_argument(
+        "--safety-herm-rel-tol",
+        type=float,
+        default=1.0e-10,
+        help="Relative Hermiticity tolerance for S_MM and reduced overlap S' in Schur safety analysis.",
+    )
+    parser.add_argument(
+        "--safety-max-combinations",
+        type=int,
+        default=5000,
+        help="Hard cap on tested removal combinations in Schur safety analysis.",
+    )
+    parser.add_argument(
+        "--safety-report-json",
+        type=Path,
+        default=None,
+        help="Optional path to write Schur safety analysis report JSON.",
+    )
     return parser.parse_args()
 
 
@@ -1168,6 +1537,52 @@ def main() -> None:
         rm_unit.extend(plan_indices)
 
     rm_unit = sorted(set(int(i) for i in rm_unit))
+
+    if args.analyze_schur_safety:
+        if use_sparse:
+            raise ValueError("--analyze-schur-safety requires dense mode; do not pass --sparse")
+        analysis_candidates = rm_unit if rm_unit else list(range(int(ham.orbits_quantity)))
+        safety_report = analyze_schur_elimination_safety(
+            S_dense=S_dense,
+            norb_per_cell=int(ham.orbits_quantity),
+            elements=[str(el) for el in ham.elements],
+            elements_orbital_map={k: [int(v) for v in vals] for k, vals in ham.elements_orbital_map.items()},
+            candidate_orbitals_unit=analysis_candidates,
+            max_group_size=int(args.safety_max_group_size),
+            eig_tol=float(args.safety_eig_tol),
+            cond_max=float(args.safety_cond_max),
+            reduced_cond_max=float(args.safety_reduced_cond_max),
+            herm_rel_tol=float(args.safety_herm_rel_tol),
+            max_combinations=int(args.safety_max_combinations),
+        )
+        single_safe_obj = safety_report.get("single_safe_details", [])
+        candidates_obj = safety_report.get("candidate_count", 0)
+        rescued_groups_obj = safety_report.get("safe_groups_with_single_unsafe_members", [])
+        if not isinstance(single_safe_obj, list):
+            raise ValueError("Internal error: single_safe_details is not a list")
+        if not isinstance(candidates_obj, int):
+            raise ValueError("Internal error: candidate_count is not an int")
+        if not isinstance(rescued_groups_obj, list):
+            raise ValueError("Internal error: safe_groups_with_single_unsafe_members is not a list")
+        single_safe = single_safe_obj
+        candidates = candidates_obj
+        rescued_groups = rescued_groups_obj
+        print("Schur safety analysis completed.")
+        print(
+            "Single safe orbitals: "
+            f"{len(single_safe)}/"
+            f"{candidates}"
+        )
+        print(
+            "Safe groups containing single-unsafe orbitals: "
+            f"{len(rescued_groups)}"
+        )
+        if args.safety_report_json is not None:
+            args.safety_report_json.parent.mkdir(parents=True, exist_ok=True)
+            with open(args.safety_report_json, "w", encoding="utf-8") as fw:
+                json.dump(safety_report, fw, indent=2)
+                fw.write("\n")
+            print(f"Saved Schur safety report: {args.safety_report_json}")
 
     if use_sparse:
         if rm_unit:
@@ -1227,10 +1642,11 @@ def main() -> None:
             sparse.save_npz(H_path, H_sparse_out)
             sparse.save_npz(S_path, S_sparse_out)
             meta_path = args.output_npz.with_name(f"{stem}_sparse_meta.json")
+            h_nrow, h_ncol = H_sparse_out.get_shape()
             with open(meta_path, "w", encoding="utf-8") as fw:
                 json.dump(
                     {
-                        "shape": [int(H_sparse_out.shape[0]), int(H_sparse_out.shape[1])],
+                        "shape": [int(h_nrow), int(h_ncol)],
                         "H_nnz": int(H_sparse_out.nnz),
                         "S_nnz": int(S_sparse_out.nnz),
                         "supercell": list(supercell),
